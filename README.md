@@ -4,14 +4,32 @@ A new Flutter project.
 
 ## Supabase setup
 
-Pass your Supabase project URL and publishable (anon) key when running the app:
+Set `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` in `.env`, then run the app
+normally:
 
 ```sh
-flutter run --dart-define=SUPABASE_URL=https://your-project.supabase.co --dart-define=SUPABASE_ANON_KEY=your-publishable-key
+flutter run
 ```
 
-Use the publishable/anon key in the client, never the `service_role` key. Protect
-tables with Supabase Row Level Security (RLS) policies.
+`connect.dart` loads `.env` at startup and initializes the Supabase client. The
+Flutter `.env` is bundled with the app, so it must contain only `SUPABASE_URL`
+and a publishable/anon key. Keep database passwords and Supabase secret keys in
+`.env.server` or another server-only secret store; never bundle them with the
+client app. Protect tables with Supabase Row Level Security (RLS) policies.
+At startup, the app checks the Supabase Auth health endpoint and displays a
+retry page if the connection check fails.
+
+## App navigation and roles
+
+The shared navigation displays role-specific menu items for `Unsign` (not
+signed in), `User`, `Technician`, `Admin`, and `SuperAdmin`. Set the signed-in
+user's `role` in Supabase `app_metadata`; the app falls back to
+`user_metadata.role` when it is not present. A signed-in account without a role
+is treated as `User`.
+
+The account button signs in with Supabase email and password. The centered
+`KUFixIT` text in the app bar is a placeholder for the web logo. The public
+ticket monitor page is in `lib/gui/tickerMonitor.dart`.
 
 Access the initialized client with `SupabaseConnection.client`, for example:
 
