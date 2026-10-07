@@ -10,8 +10,11 @@ class SupabaseConnection {
       dotenv.env['SUPABASE_PUBLISHABLE_KEY'] ??
       dotenv.env['SUPABASE_ANON_KEY'] ??
       '';
+  static String get url => _url;
+  static String get anonKey => _anonKey;
   static bool _isEnvironmentLoaded = false;
   static bool _isInitialized = false;
+  static bool get isInitialized => _isInitialized;
 
   static Future<void> initialize() async {
     if (!_isEnvironmentLoaded) {
@@ -34,10 +37,7 @@ class SupabaseConnection {
 
     final endpoint = Uri.parse(_url).resolve('/auth/v1/health');
     final response = await http
-        .get(
-          endpoint,
-          headers: {'apikey': _anonKey},
-        )
+        .get(endpoint, headers: {'apikey': _anonKey})
         .timeout(const Duration(seconds: 10));
 
     if (response.statusCode < 200 || response.statusCode >= 300) {

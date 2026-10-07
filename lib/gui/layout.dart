@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../auth/function_error_message.dart';
+import '../auth/temporary_account_session.dart';
 import '../database/connect.dart';
+import 'personal_info_page.dart';
+import 'superRegister.dart';
 import 'tickerMonitor.dart';
 
 class Layout extends StatefulWidget {
@@ -16,6 +19,7 @@ class Layout extends StatefulWidget {
 class _LayoutState extends State<Layout> {
   final _scaffoldKey = GlobalKey<ScaffoldState>();
   String? _selectedPage;
+  int _profileImageRevision = 0;
 
   @override
   Widget build(BuildContext context) {
@@ -23,20 +27,16 @@ class _LayoutState extends State<Layout> {
       return _buildShell(role, null);
     }
 
-    return StreamBuilder<AuthState>(
-      stream: SupabaseConnection.client.auth.onAuthStateChange,
-      initialData: AuthState(
-        AuthChangeEvent.initialSession,
-        SupabaseConnection.client.auth.currentSession,
-      ),
-      builder: (context, snapshot) {
-        final user = snapshot.data?.session?.user;
-        return _buildShell(_roleFor(user), user);
+    return AnimatedBuilder(
+      animation: TemporaryAccountSession.instance,
+      builder: (context, _) {
+        final account = TemporaryAccountSession.instance.account;
+        return _buildShell(account?.role ?? 'Unsign', account);
       },
     );
   }
 
-  Widget _buildShell(String role, User? user) {
+  Widget _buildShell(String role, TemporaryAccount? temporaryAccount) {
     final pages = _pagesFor(role);
     final selectedIndex = pages.indexWhere((page) => page.id == _selectedPage);
     final currentIndex = selectedIndex < 0 ? 0 : selectedIndex;
@@ -55,7 +55,7 @@ class _LayoutState extends State<Layout> {
           style: TextStyle(fontWeight: FontWeight.bold),
         ),
         actions: [
-          if (user == null)
+          if (temporaryAccount == null)
             IconButton(
               tooltip: 'เข้าสู่ระบบ',
               onPressed: () => _showLoginDialog(context),
@@ -70,14 +70,28 @@ class _LayoutState extends State<Layout> {
               onSelected: (value) {
                 if (value == 'sign_out') {
                   _signOut(context);
+                } else if (value == 'personal_info') {
+                  _showPersonalInfoPage(context, temporaryAccount);
+                } else if (value == 'register') {
+                  _showRegisterPage(context);
                 }
               },
               itemBuilder: (context) => [
                 PopupMenuItem<String>(
                   enabled: false,
-                  child: Text(_displayName(user)),
+                  child: Text(temporaryAccount.displayName),
                 ),
                 const PopupMenuDivider(),
+                if (role == 'User' || role == 'Admin')
+                  const PopupMenuItem<String>(
+                    value: 'personal_info',
+                    child: Text('ข้อมูลส่วนตัว'),
+                  )
+                else
+                  const PopupMenuItem<String>(
+                    value: 'register',
+                    child: Text('สร้างบัญชีผู้ใช้'),
+                  ),
                 const PopupMenuItem<String>(
                   value: 'sign_out',
                   child: Text('ออกจากระบบ'),
@@ -85,7 +99,7 @@ class _LayoutState extends State<Layout> {
               ],
               child: Padding(
                 padding: const EdgeInsets.only(right: 16),
-                child: _avatar(user),
+                child: _avatar(temporaryAccount),
               ),
             ),
         ],
@@ -108,7 +122,7 @@ class _LayoutState extends State<Layout> {
                       ),
                     ),
                     const SizedBox(height: 8),
-                    Text('บทบาท: $role'),
+                    Text('UID: ${temporaryAccount?.id ?? '-'}'),
                   ],
                 ),
               ),
@@ -150,57 +164,129 @@ class _LayoutState extends State<Layout> {
   Future<void> _showLoginDialog(BuildContext context) {
     return showDialog<void>(
       context: context,
-      builder: (context) => const _LoginDialog(),
+      builder: (dialogContext) => _LoginDialog(
+        onRegister: () {
+          Navigator.pop(dialogContext);
+          _showRegisterPage(context);
+        },
+      ),
     );
   }
 
-  Future<void> _signOut(BuildContext context) async {
-    try {
-      await SupabaseConnection.client.auth.signOut();
-    } on Exception catch (error) {
-      if (!context.mounted) return;
+  Future<void> _showRegisterPage(BuildContext context) async {
+    final created = await Navigator.of(
+      context,
+    ).push<bool>(MaterialPageRoute(builder: (_) => const SuperRegisterPage()));
+    if (created == true && context.mounted) {
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text('ออกจากระบบไม่สำเร็จ: $error')));
+      ).showSnackBar(const SnackBar(content: Text('สร้างบัญชีเรียบร้อยแล้ว')));
     }
   }
 
-  String _roleFor(User? user) {
-    if (user == null) return 'Unsign';
-
-    final rawRole = user.appMetadata['role'] ?? user.userMetadata?['role'];
-    final normalizedRole = rawRole?.toString().toLowerCase();
-    return switch (normalizedRole) {
-      'technician' => 'Technician',
-      'admin' => 'Admin',
-      'superadmin' => 'SuperAdmin',
-      _ => 'User',
-    };
+  Future<void> _showPersonalInfoPage(
+    BuildContext context,
+    TemporaryAccount? temporaryAccount,
+  ) async {
+    if (temporaryAccount == null) return;
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => PersonalInfoPage(temporaryAccount: temporaryAccount),
+      ),
+    );
+    if (mounted) {
+      setState(() => _profileImageRevision++);
+    }
   }
 
-  String _displayName(User user) {
-    final name = user.userMetadata?['full_name'] ?? user.userMetadata?['name'];
-    if (name is String && name.isNotEmpty) return name;
-    return user.email ?? 'บัญชีผู้ใช้';
+  void _signOut(BuildContext context) {
+    TemporaryAccountSession.instance.clear();
   }
 
-  Widget _avatar(User user) {
-    final avatarUrl = user.userMetadata?['avatar_url'];
-    if (avatarUrl is String && avatarUrl.isNotEmpty) {
-      return ClipOval(
-        child: Image.network(
-          avatarUrl,
-          width: 36,
-          height: 36,
-          fit: BoxFit.cover,
-          errorBuilder: (context, error, stackTrace) =>
-              const CircleAvatar(child: Icon(Icons.person_outline)),
-        ),
+  Widget _avatar(TemporaryAccount? temporaryAccount) {
+    return _ProfileAvatar(
+      key: ValueKey('${temporaryAccount?.id}:$_profileImageRevision'),
+      accessToken: temporaryAccount?.accessToken,
+    );
+  }
+}
+
+class _ProfileAvatar extends StatefulWidget {
+  const _ProfileAvatar({super.key, required this.accessToken});
+
+  final String? accessToken;
+
+  @override
+  State<_ProfileAvatar> createState() => _ProfileAvatarState();
+}
+
+class _ProfileAvatarState extends State<_ProfileAvatar> {
+  String? _avatarUrl;
+  bool _isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadAvatar();
+  }
+
+  @override
+  void didUpdateWidget(covariant _ProfileAvatar oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.accessToken != widget.accessToken) _loadAvatar();
+  }
+
+  Future<void> _loadAvatar() async {
+    final accessToken = widget.accessToken;
+    if (accessToken == null || !SupabaseConnection.isInitialized) {
+      setState(() {
+        _avatarUrl = null;
+        _isLoading = false;
+      });
+      return;
+    }
+
+    setState(() => _isLoading = true);
+    try {
+      final response = await SupabaseConnection.client.functions.invoke(
+        'profile-avatar',
+        headers: {
+          'Authorization': 'Bearer $accessToken',
+          'x-avatar-action': 'get',
+        },
+        body: const {'action': 'get'},
       );
+      final data = response.data;
+      final url = data is Map ? data['url'] : null;
+      if (url != null && url is! String) {
+        throw const FormatException('Invalid profile image response.');
+      }
+      if (mounted) {
+        setState(() {
+          _avatarUrl = url as String?;
+          _isLoading = false;
+        });
+      }
+    } on Exception catch (error) {
+      debugPrint('Failed to load profile image for app bar: $error');
+      if (mounted) {
+        setState(() {
+          _avatarUrl = null;
+          _isLoading = false;
+        });
+      }
     }
-    return const CircleAvatar(
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final imageUrl = _avatarUrl;
+    return CircleAvatar(
       radius: 18,
-      child: Icon(Icons.person_outline, size: 21),
+      backgroundImage: imageUrl == null ? null : NetworkImage(imageUrl),
+      child: imageUrl == null || _isLoading
+          ? const Icon(Icons.person_outline, size: 21)
+          : null,
     );
   }
 }
@@ -349,7 +435,9 @@ class _PageContent extends StatelessWidget {
 }
 
 class _LoginDialog extends StatefulWidget {
-  const _LoginDialog();
+  const _LoginDialog({required this.onRegister});
+
+  final VoidCallback onRegister;
 
   @override
   State<_LoginDialog> createState() => _LoginDialogState();
@@ -357,14 +445,14 @@ class _LoginDialog extends StatefulWidget {
 
 class _LoginDialogState extends State<_LoginDialog> {
   final _formKey = GlobalKey<FormState>();
-  final _emailController = TextEditingController();
+  final _usernameController = TextEditingController();
   final _passwordController = TextEditingController();
   bool _isSubmitting = false;
   String? _errorMessage;
 
   @override
   void dispose() {
-    _emailController.dispose();
+    _usernameController.dispose();
     _passwordController.dispose();
     super.dispose();
   }
@@ -381,11 +469,12 @@ class _LoginDialogState extends State<_LoginDialog> {
             mainAxisSize: MainAxisSize.min,
             children: [
               TextFormField(
-                controller: _emailController,
-                keyboardType: TextInputType.emailAddress,
-                decoration: const InputDecoration(labelText: 'อีเมล'),
+                controller: _usernameController,
+                autocorrect: false,
+                enableSuggestions: false,
+                decoration: const InputDecoration(labelText: 'Username'),
                 validator: (value) => value == null || value.trim().isEmpty
-                    ? 'กรุณากรอกอีเมล'
+                    ? 'กรุณากรอก Username'
                     : null,
               ),
               TextFormField(
@@ -394,6 +483,13 @@ class _LoginDialogState extends State<_LoginDialog> {
                 decoration: const InputDecoration(labelText: 'รหัสผ่าน'),
                 validator: (value) =>
                     value == null || value.isEmpty ? 'กรุณากรอกรหัสผ่าน' : null,
+              ),
+              Align(
+                alignment: Alignment.centerRight,
+                child: TextButton(
+                  onPressed: _isSubmitting ? null : widget.onRegister,
+                  child: const Text('ยังไม่มีบัญชี? สมัครสมาชิก'),
+                ),
               ),
               if (_errorMessage != null) ...[
                 const SizedBox(height: 12),
@@ -433,14 +529,21 @@ class _LoginDialogState extends State<_LoginDialog> {
     });
 
     try {
-      await SupabaseConnection.client.auth.signInWithPassword(
-        email: _emailController.text.trim(),
-        password: _passwordController.text,
+      final response = await SupabaseConnection.client.functions.invoke(
+        'login-user',
+        body: {
+          'username': _usernameController.text.trim(),
+          'password': _passwordController.text,
+        },
       );
+      TemporaryAccountSession.instance.setFromResponse(response.data);
       if (mounted) Navigator.pop(context);
     } on Exception catch (error) {
       if (!mounted) return;
-      setState(() => _errorMessage = 'เข้าสู่ระบบไม่สำเร็จ: $error');
+      setState(
+        () =>
+            _errorMessage = functionErrorMessage(error, 'เข้าสู่ระบบไม่สำเร็จ'),
+      );
     } finally {
       if (mounted) setState(() => _isSubmitting = false);
     }
