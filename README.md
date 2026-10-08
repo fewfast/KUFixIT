@@ -140,10 +140,12 @@ keeps the Google session so the app can issue a new temporary session on a
 later launch.
 
 The account button signs in through Google OAuth.
-At this stage, the role-specific page content is still placeholder UI. Database
-operations protected by Supabase RLS are not available to temporary sessions;
-future data operations need server-side Edge Function endpoints that verify
-the signed temporary session and authorize each role.
+The Portal User repair request form is in `lib/gui/fixRequest.dart`; repair
+request submission and photo uploads are not connected to a backend yet. Other
+role-specific page content is still placeholder UI. Database operations
+protected by Supabase RLS are not available to temporary sessions; future data
+operations need server-side Edge Function endpoints that verify the signed
+temporary session and authorize each role.
 The centered
 `KUFixIT` text in the app bar is a placeholder for the web logo. The public
 ticket monitor page is in `lib/gui/tickerMonitor.dart`.
@@ -167,3 +169,24 @@ A few resources to get you started if this is your first Flutter project:
 For help getting started with Flutter development, view the
 [online documentation](https://docs.flutter.dev/), which offers tutorials,
 samples, guidance on mobile development, and a full API reference.
+
+## Map location picker
+
+The "อื่นๆ" repair location supports selecting a point on Google Maps on
+Android and iOS. Windows, macOS, Linux, and web use OpenStreetMap because the
+Google Maps Flutter plugin does not support native desktop platforms. The
+selected latitude and longitude stay in the form state; repair submission is
+not yet connected to a backend.
+
+To enable Google Maps on Android and iOS, enable the Maps SDK for Android and
+Maps SDK for iOS in Google Cloud Console, then create a restricted API key.
+Keep the key out of source control:
+
+- Android: add `MAPS_API_KEY=<your-key>` to `android/local.properties`.
+- iOS: create the ignored file `ios/Flutter/MapsApiKey.xcconfig` containing
+  `MAPS_API_KEY = <your-key>`.
+
+Rebuild the app after adding the key. Restrict each platform's key to its
+application identifier and only the required Maps SDK.
+The desktop/web fallback uses the public OpenStreetMap tile server; review its
+tile usage policy before deploying a high-traffic production app.

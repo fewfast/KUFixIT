@@ -7,6 +7,7 @@ import '../auth/function_error_message.dart';
 import '../auth/google_auth.dart';
 import '../auth/temporary_account_session.dart';
 import '../database/connect.dart';
+import 'fixRequest.dart';
 import 'personal_info_page.dart';
 import 'superRegister.dart';
 import 'tickerMonitor.dart';
@@ -185,6 +186,8 @@ class _LayoutState extends State<Layout> {
           for (final page in pages)
             if (page.id == 'ticket_monitor')
               const TickerMonitor()
+            else if (page.id == 'new_request')
+              const FixRequestPage()
             else
               _PageContent(page: page, role: role),
         ],

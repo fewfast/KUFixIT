@@ -37,6 +37,7 @@ migrate_working_dir/
 .env
 .env.*
 !.env.example
+/ios/Flutter/MapsApiKey.xcconfig
 
 # Symbolication related
 app.*.symbols

@@ -46,6 +46,57 @@ void main() {
     expect(find.text('จัดการผู้ใช้'), findsNothing);
   });
 
+  testWidgets('User can open the repair request form', (tester) async {
+    await tester.pumpWidget(
+      const MaterialApp(home: Layout(roleOverride: 'User')),
+    );
+
+    await tester.tap(find.byTooltip('เปิดเมนู'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('แจ้งซ่อม'));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text('เลือกอาคารและระบุรายละเอียดอุปกรณ์ที่ต้องการแจ้งซ่อม'),
+      findsOneWidget,
+    );
+    expect(find.text('อาคาร'), findsOneWidget);
+    expect(find.text('ชั้นที่ (ถ้ามี)'), findsOneWidget);
+    expect(find.text('เลขห้อง (ถ้ามี)'), findsOneWidget);
+    expect(find.text('ชื่ออุปกรณ์ที่พัง'), findsOneWidget);
+    expect(find.text('เพิ่มรูปถ่าย'), findsOneWidget);
+    expect(find.text('ข้อมูลเพิ่มเติม'), findsOneWidget);
+  });
+
+  testWidgets('repair form supports other locations and additional items', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      const MaterialApp(home: Layout(roleOverride: 'User')),
+    );
+
+    await tester.tap(find.byTooltip('เปิดเมนู'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('แจ้งซ่อม'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(TextFormField).first);
+    await tester.enterText(find.byType(TextFormField).first, 'อื่น');
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('อื่นๆ').last);
+    await tester.pumpAndSettle();
+
+    expect(find.text('ระบุชื่อตำแหน่ง'), findsOneWidget);
+    expect(find.text('เลือกตำแหน่งบนแผนที่'), findsOneWidget);
+    expect(find.text('ยังไม่ได้เลือกพิกัด'), findsOneWidget);
+    await tester.tap(find.byTooltip('เพิ่มรายการ'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('รายการอุปกรณ์ที่ชำรุด'));
+    await tester.pumpAndSettle();
+    await tester.drag(find.byType(ListView).first, const Offset(0, -900));
+    await tester.pumpAndSettle();
+    expect(find.text('รายการที่ 2'), findsOneWidget);
+  });
+
   testWidgets('User drawer shows the database UID and role', (tester) async {
     final expiresAt =
         DateTime.now().add(const Duration(hours: 1)).millisecondsSinceEpoch ~/
