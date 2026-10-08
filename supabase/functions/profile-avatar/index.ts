@@ -1,5 +1,6 @@
 import { createClient, type SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { verifyTemporarySession } from "../_shared/credentials.ts";
+import { getSupabaseAdminKey } from "../_shared/supabase_admin_key.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -63,7 +64,9 @@ async function getProfileIdentity(
   if (
     claims &&
     typeof claims.sub === "string" &&
-    /^\d{1,19}$/.test(claims.sub) &&
+    (/^\d{1,19}$/.test(claims.sub) ||
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+        .test(claims.sub)) &&
     (claims.role === "User" || claims.role === "Admin")
   ) {
     return { id: claims.sub, role: claims.role };
@@ -111,7 +114,7 @@ Deno.serve(async (request) => {
   }
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL");
-  const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  const serviceRoleKey = getSupabaseAdminKey();
   if (!supabaseUrl || !serviceRoleKey) {
     console.error("Supabase server configuration is missing.");
     return jsonResponse(500, { error: "Profile image service is not configured." });

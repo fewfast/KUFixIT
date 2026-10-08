@@ -1,6 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../auth/function_error_message.dart';
+import '../auth/google_auth.dart';
 import '../auth/temporary_account_session.dart';
 import '../database/connect.dart';
 import 'personal_info_page.dart';
@@ -20,6 +24,13 @@ class _LayoutState extends State<Layout> {
   final _scaffoldKey = GlobalKey<ScaffoldState>();
   String? _selectedPage;
   int _profileImageRevision = 0;
+  bool _isRefreshingGoogleAccount = false;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.roleOverride == null) _restoreGoogleSession();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -82,12 +93,13 @@ class _LayoutState extends State<Layout> {
                   child: Text(temporaryAccount.displayName),
                 ),
                 const PopupMenuDivider(),
-                if (role == 'User' || role == 'Admin')
+                if (!temporaryAccount.isSystemAccount &&
+                    (role == 'User' || role == 'Admin'))
                   const PopupMenuItem<String>(
                     value: 'personal_info',
                     child: Text('ข้อมูลส่วนตัว'),
                   )
-                else
+                else if (!temporaryAccount.isSystemAccount)
                   const PopupMenuItem<String>(
                     value: 'register',
                     child: Text('สร้างบัญชีผู้ใช้'),
@@ -121,8 +133,18 @@ class _LayoutState extends State<Layout> {
                         fontWeight: FontWeight.bold,
                       ),
                     ),
-                    const SizedBox(height: 8),
-                    Text('UID: ${temporaryAccount?.id ?? '-'}'),
+                    if (temporaryAccount != null) ...[
+                      const SizedBox(height: 8),
+                      Text(
+                        temporaryAccount.isSystemAccount
+                            ? 'บัญชี: ${temporaryAccount.username}'
+                            : 'UID: ${temporaryAccount.uid ?? '-'}',
+                      ),
+                    ],
+                    if (role == 'User' || role == 'Admin') ...[
+                      const SizedBox(height: 4),
+                      Text('Role: $role'),
+                    ],
                   ],
                 ),
               ),
@@ -148,6 +170,15 @@ class _LayoutState extends State<Layout> {
           ),
         ),
       ),
+      onDrawerChanged: (isOpened) {
+        final account = temporaryAccount;
+        if (isOpened &&
+            account != null &&
+            !account.isSystemAccount &&
+            account.uid == null) {
+          _refreshGoogleAccount();
+        }
+      },
       body: IndexedStack(
         index: currentIndex,
         children: [
@@ -159,6 +190,32 @@ class _LayoutState extends State<Layout> {
         ],
       ),
     );
+  }
+
+  Future<void> _refreshGoogleAccount() async {
+    if (_isRefreshingGoogleAccount || !SupabaseConnection.isInitialized) return;
+    final client = SupabaseConnection.client;
+    if (!isGoogleUser(client.auth.currentUser)) return;
+
+    _isRefreshingGoogleAccount = true;
+    try {
+      final response = await client.functions.invoke(
+        'login-user',
+        body: const <String, dynamic>{},
+      );
+      TemporaryAccountSession.instance.setFromResponse(response.data);
+    } on Exception catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            functionErrorMessage(error, 'โหลดข้อมูล UID ไม่สำเร็จ'),
+          ),
+        ),
+      );
+    } finally {
+      _isRefreshingGoogleAccount = false;
+    }
   }
 
   Future<void> _showLoginDialog(BuildContext context) {
@@ -199,11 +256,79 @@ class _LayoutState extends State<Layout> {
     }
   }
 
-  void _signOut(BuildContext context) {
-    TemporaryAccountSession.instance.clear();
+  Future<void> _restoreGoogleSession() async {
+    if (!SupabaseConnection.isInitialized) return;
+    final client = SupabaseConnection.client;
+    if (!isGoogleUser(client.auth.currentUser)) return;
+
+    try {
+      final response = await client.functions.invoke(
+        'login-user',
+        body: const <String, dynamic>{},
+      );
+      TemporaryAccountSession.instance.setFromResponse(response.data);
+    } on Exception catch (error) {
+      if (!mounted) return;
+      if (_isUnregisteredGoogleAccount(error)) {
+        await _registerGoogleAccount(client);
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              functionErrorMessage(error, 'เข้าสู่ระบบด้วย Google ไม่สำเร็จ'),
+            ),
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _registerGoogleAccount(SupabaseClient client) async {
+    try {
+      final response = await client.functions.invoke(
+        'register-user',
+        body: const <String, dynamic>{},
+      );
+      TemporaryAccountSession.instance.setFromResponse(response.data);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('สมัครสมาชิกและเข้าสู่ระบบเรียบร้อยแล้ว')),
+      );
+    } on Exception catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(functionErrorMessage(error, 'สร้างบัญชีไม่สำเร็จ')),
+        ),
+      );
+    }
+  }
+
+  bool _isUnregisteredGoogleAccount(Object error) {
+    if (error is! FunctionException || error.status != 404) return false;
+    final details = error.details;
+    return details is Map && details['code'] == 'google_account_not_registered';
+  }
+
+  Future<void> _signOut(BuildContext context) async {
+    try {
+      await SupabaseConnection.client.auth.signOut();
+      TemporaryAccountSession.instance.clear();
+    } on Exception catch (error) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('ออกจากระบบไม่สำเร็จ: $error')));
+    }
   }
 
   Widget _avatar(TemporaryAccount? temporaryAccount) {
+    if (temporaryAccount?.isSystemAccount == true) {
+      return const CircleAvatar(
+        radius: 17,
+        child: Icon(Icons.person_outline, size: 21),
+      );
+    }
     return _ProfileAvatar(
       key: ValueKey('${temporaryAccount?.id}:$_profileImageRevision'),
       accessToken: temporaryAccount?.accessToken,
@@ -444,6 +569,156 @@ class _LoginDialog extends StatefulWidget {
 }
 
 class _LoginDialogState extends State<_LoginDialog> {
+  StreamSubscription<AuthState>? _authSubscription;
+  bool _isSubmitting = false;
+  bool _isCompletingSignIn = false;
+  String? _errorMessage;
+
+  @override
+  void initState() {
+    super.initState();
+    if (SupabaseConnection.isInitialized) {
+      _authSubscription = SupabaseConnection.client.auth.onAuthStateChange
+          .listen((state) {
+            if (state.event == AuthChangeEvent.signedIn &&
+                isGoogleUser(state.session?.user)) {
+              _completeGoogleSignIn();
+            }
+          });
+    }
+  }
+
+  @override
+  void dispose() {
+    _authSubscription?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('เข้าสู่ระบบ'),
+      content: SizedBox(
+        width: 360,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('เข้าสู่ระบบด้วยบัญชี Google ของคุณ'),
+            const SizedBox(height: 16),
+            FilledButton.icon(
+              onPressed: _isSubmitting ? null : _signIn,
+              icon: const Icon(Icons.login),
+              label: _isSubmitting
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Text('เข้าสู่ระบบด้วย Google'),
+            ),
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton(
+                onPressed: _isSubmitting ? null : widget.onRegister,
+                child: const Text('ยังไม่มีบัญชี? สมัครสมาชิก'),
+              ),
+            ),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: _isSubmitting ? null : _showStaffLoginDialog,
+              icon: const Icon(Icons.engineering_outlined),
+              label: const Text('เข้าสู่ระบบช่างและเจ้าหน้าที่ระดับสูง'),
+            ),
+            if (_errorMessage != null) ...[
+              const SizedBox(height: 12),
+              Text(
+                _errorMessage!,
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _isSubmitting ? null : () => Navigator.pop(context),
+          child: const Text('ยกเลิก'),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _showStaffLoginDialog() async {
+    final signedIn = await showDialog<bool>(
+      context: context,
+      builder: (_) => const _StaffLoginDialog(),
+    );
+    if (signedIn == true && mounted) Navigator.pop(context);
+  }
+
+  Future<void> _signIn() async {
+    if (!SupabaseConnection.isInitialized) {
+      setState(() => _errorMessage = 'ยังไม่ได้เชื่อมต่อบริการเข้าสู่ระบบ');
+      return;
+    }
+
+    setState(() {
+      _isSubmitting = true;
+      _errorMessage = null;
+    });
+
+    try {
+      await startGoogleSignIn();
+    } on Exception catch (error) {
+      if (!mounted) return;
+      setState(
+        () => _errorMessage = functionErrorMessage(
+          error,
+          'เข้าสู่ระบบด้วย Google ไม่สำเร็จ',
+        ),
+      );
+    } finally {
+      if (mounted && !_isCompletingSignIn) {
+        setState(() => _isSubmitting = false);
+      }
+    }
+  }
+
+  Future<void> _completeGoogleSignIn() async {
+    if (_isCompletingSignIn || !mounted) return;
+    _isCompletingSignIn = true;
+    setState(() {
+      _isSubmitting = true;
+      _errorMessage = null;
+    });
+    try {
+      final response = await SupabaseConnection.client.functions.invoke(
+        'login-user',
+        body: const <String, dynamic>{},
+      );
+      TemporaryAccountSession.instance.setFromResponse(response.data);
+      if (mounted) Navigator.pop(context);
+    } on Exception catch (error) {
+      if (!mounted) return;
+      setState(
+        () =>
+            _errorMessage = functionErrorMessage(error, 'เข้าสู่ระบบไม่สำเร็จ'),
+      );
+    } finally {
+      _isCompletingSignIn = false;
+      if (mounted) setState(() => _isSubmitting = false);
+    }
+  }
+}
+
+class _StaffLoginDialog extends StatefulWidget {
+  const _StaffLoginDialog();
+
+  @override
+  State<_StaffLoginDialog> createState() => _StaffLoginDialogState();
+}
+
+class _StaffLoginDialogState extends State<_StaffLoginDialog> {
   final _formKey = GlobalKey<FormState>();
   final _usernameController = TextEditingController();
   final _passwordController = TextEditingController();
@@ -460,36 +735,34 @@ class _LoginDialogState extends State<_LoginDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      title: const Text('เข้าสู่ระบบ'),
-      content: Form(
-        key: _formKey,
-        child: SizedBox(
-          width: 360,
+      title: const Text('เข้าสู่ระบบช่างและเจ้าหน้าที่ระดับสูง'),
+      content: SizedBox(
+        width: 360,
+        child: Form(
+          key: _formKey,
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               TextFormField(
                 controller: _usernameController,
-                autocorrect: false,
-                enableSuggestions: false,
-                decoration: const InputDecoration(labelText: 'Username'),
+                enabled: !_isSubmitting,
+                textInputAction: TextInputAction.next,
+                autofillHints: const [AutofillHints.username],
+                decoration: const InputDecoration(labelText: 'ชื่อผู้ใช้'),
                 validator: (value) => value == null || value.trim().isEmpty
-                    ? 'กรุณากรอก Username'
+                    ? 'กรุณากรอกชื่อผู้ใช้'
                     : null,
               ),
               TextFormField(
                 controller: _passwordController,
+                enabled: !_isSubmitting,
                 obscureText: true,
+                textInputAction: TextInputAction.done,
+                autofillHints: const [AutofillHints.password],
+                onFieldSubmitted: (_) => _signIn(),
                 decoration: const InputDecoration(labelText: 'รหัสผ่าน'),
                 validator: (value) =>
                     value == null || value.isEmpty ? 'กรุณากรอกรหัสผ่าน' : null,
-              ),
-              Align(
-                alignment: Alignment.centerRight,
-                child: TextButton(
-                  onPressed: _isSubmitting ? null : widget.onRegister,
-                  child: const Text('ยังไม่มีบัญชี? สมัครสมาชิก'),
-                ),
               ),
               if (_errorMessage != null) ...[
                 const SizedBox(height: 12),
@@ -504,7 +777,7 @@ class _LoginDialogState extends State<_LoginDialog> {
       ),
       actions: [
         TextButton(
-          onPressed: _isSubmitting ? null : () => Navigator.pop(context),
+          onPressed: _isSubmitting ? null : () => Navigator.pop(context, false),
           child: const Text('ยกเลิก'),
         ),
         FilledButton(
@@ -523,21 +796,25 @@ class _LoginDialogState extends State<_LoginDialog> {
 
   Future<void> _signIn() async {
     if (!_formKey.currentState!.validate()) return;
+    if (!SupabaseConnection.isInitialized) {
+      setState(() => _errorMessage = 'ยังไม่ได้เชื่อมต่อบริการเข้าสู่ระบบ');
+      return;
+    }
+
     setState(() {
       _isSubmitting = true;
       _errorMessage = null;
     });
-
     try {
       final response = await SupabaseConnection.client.functions.invoke(
-        'login-user',
+        'staff-login',
         body: {
           'username': _usernameController.text.trim(),
           'password': _passwordController.text,
         },
       );
       TemporaryAccountSession.instance.setFromResponse(response.data);
-      if (mounted) Navigator.pop(context);
+      if (mounted) Navigator.pop(context, true);
     } on Exception catch (error) {
       if (!mounted) return;
       setState(

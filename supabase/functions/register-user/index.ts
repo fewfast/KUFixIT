@@ -1,12 +1,10 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import {
   createTemporarySession,
-  hashPassword,
   type TemporaryUser,
 } from "../_shared/credentials.ts";
-import {
-  hashThaiNationalId,
-} from "../_shared/thai_national_id.ts";
+import { bearerToken, verifyGoogleUser } from "../_shared/google_auth.ts";
+import { getSupabaseAdminKey } from "../_shared/supabase_admin_key.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -15,13 +13,71 @@ const corsHeaders = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
-const validRoles = new Set(["User", "Admin", "SuperAdmin"]);
-
 function jsonResponse(status: number, body: Record<string, unknown>) {
   return new Response(JSON.stringify(body), {
     status,
     headers: { ...corsHeaders, "Content-Type": "application/json" },
   });
+}
+
+function metadataValue(user: { user_metadata?: Record<string, unknown> }, keys: string[]) {
+  for (const key of keys) {
+    const value = user.user_metadata?.[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return null;
+}
+
+function googleDisplayName(user: { user_metadata?: Record<string, unknown> }, email: string) {
+  const fullName = metadataValue(user, ["full_name", "name", "display_name"]);
+  const givenName = metadataValue(user, ["given_name", "first_name"]);
+  const familyName = metadataValue(user, ["family_name", "last_name"]);
+  const name = fullName || [givenName, familyName].filter(Boolean).join(" ");
+  return (name || email.split("@")[0]).trim().slice(0, 160) ||
+    email.split("@")[0];
+}
+
+function usernameForGoogleUser(email: string, googleUserId: string) {
+  let prefix = email
+    .split("@")[0]
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, "")
+    .slice(0, 19);
+  if (prefix.length < 3) prefix = `usr${prefix}`;
+  const suffix = googleUserId.replaceAll("-", "").slice(0, 10).toLowerCase();
+  return `${prefix}_${suffix}`;
+}
+
+function registrationResponse(
+  account: {
+    google_auth_user_id: string;
+    uid: number;
+    status: string;
+    "Display Name": string;
+    role: string;
+  },
+  username: string,
+  firstName: string,
+  lastName: string,
+  serviceRoleKey: string,
+) {
+  const user: TemporaryUser = {
+    id: account.google_auth_user_id,
+    username,
+    firstname: firstName.slice(0, 80),
+    lastname: lastName.slice(0, 80),
+    role: account.role,
+  };
+  return createTemporarySession(user, serviceRoleKey).then((session) =>
+    jsonResponse(201, {
+      ...user,
+      uid: account.uid,
+      status: account.status,
+      displayname: account["Display Name"],
+      hasNationalId: false,
+      ...session,
+    })
+  );
 }
 
 Deno.serve(async (request) => {
@@ -33,144 +89,109 @@ Deno.serve(async (request) => {
   }
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL");
-  const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  const serviceRoleKey = getSupabaseAdminKey();
   if (!supabaseUrl || !serviceRoleKey) {
-    console.error("SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is not configured.");
+    console.error("Supabase server configuration is missing.");
     return jsonResponse(500, { error: "Registration service is not configured." });
   }
 
-  let payload: Record<string, unknown>;
-  try {
-    const value: unknown = await request.json();
-    if (typeof value !== "object" || value === null || Array.isArray(value)) {
-      return jsonResponse(400, { error: "Invalid request body." });
-    }
-    payload = value as Record<string, unknown>;
-  } catch {
-    return jsonResponse(400, { error: "Invalid JSON request body." });
+  const token = bearerToken(request);
+  if (!token) {
+    return jsonResponse(401, { error: "Sign in with Google before registering." });
   }
-
-  const firstName =
-    typeof payload.firstName === "string" ? payload.firstName.trim() : "";
-  const lastName =
-    typeof payload.lastName === "string" ? payload.lastName.trim() : "";
-  const nationalId =
-    typeof payload.nationalId === "string" ? payload.nationalId : "";
-  const username =
-    typeof payload.username === "string" ? payload.username.trim() : "";
-  const password =
-    typeof payload.password === "string" ? payload.password : "";
-  const role = typeof payload.role === "string" ? payload.role : "";
-
-  if (!firstName || !lastName || !nationalId || !username || !password || !role) {
-    return jsonResponse(400, { error: "All registration fields are required." });
-  }
-  if (!/^\d{13}$/.test(nationalId)) {
-    return jsonResponse(400, { error: "Citizen ID must be exactly 13 digits." });
-  }
-  if (firstName.length > 80 || lastName.length > 80) {
-    return jsonResponse(400, { error: "Names must be 80 characters or fewer." });
-  }
-  if (!/^[a-zA-Z0-9_-]{3,30}$/.test(username)) {
-    return jsonResponse(400, { error: "Username must be 3-30 valid characters." });
-  }
-  if (
-    password.length < 8 ||
-    password.length > 128 ||
-    !/[a-z]/.test(password) ||
-    !/[A-Z]/.test(password) ||
-    !/[0-9]/.test(password) ||
-    !/[^a-zA-Z0-9]/.test(password)
-  ) {
-    return jsonResponse(400, { error: "Password does not meet the security requirements." });
-  }
-  if (!validRoles.has(role)) {
-    return jsonResponse(400, { error: "Invalid role." });
-  }
-
   const supabase = createClient(supabaseUrl, serviceRoleKey, {
     auth: { autoRefreshToken: false, persistSession: false },
   });
-
-  const clientIp =
-    request.headers.get("cf-connecting-ip") ??
-    request.headers.get("x-forwarded-for")?.split(",").at(-1)?.trim();
-  if (!clientIp) {
-    console.error("Unable to determine client IP for registration rate limiting.");
-    return jsonResponse(503, { error: "Registration service is temporarily unavailable." });
+  const googleUser = await verifyGoogleUser(supabase, token);
+  const email = googleUser?.email?.trim().toLowerCase();
+  if (!googleUser || !email) {
+    return jsonResponse(401, { error: "A valid Google account is required." });
   }
 
-  const hmacKey = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(serviceRoleKey),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const ipDigest = await crypto.subtle.sign(
-    "HMAC",
-    hmacKey,
-    new TextEncoder().encode(clientIp),
-  );
-  const ipHash = Array.from(new Uint8Array(ipDigest), (byte) =>
-    byte.toString(16).padStart(2, "0")
-  ).join("");
-  const { data: isWithinRateLimit, error: rateLimitError } = await supabase.rpc(
-    "consume_registration_rate_limit",
-    { p_ip_hash: ipHash, p_limit: 5, p_window_seconds: 3600 },
-  );
-  if (rateLimitError) {
-    console.error("Registration rate-limit check failed.", rateLimitError);
-    return jsonResponse(503, { error: "Registration service is temporarily unavailable." });
+  const displayname = googleDisplayName(googleUser, email);
+  const nameParts = displayname.split(/\s+/);
+  const firstName =
+    metadataValue(googleUser, ["given_name", "first_name"]) ??
+    nameParts.shift() ??
+    displayname;
+  const lastName =
+    metadataValue(googleUser, ["family_name", "last_name"]) ??
+    nameParts.join(" ");
+  const username = usernameForGoogleUser(email, googleUser.id);
+  const { data: existingAccount, error: lookupError } = await supabase
+    .from("Users")
+    .select("google_auth_user_id, uid, status, \"Display Name\", role")
+    .eq("google_auth_user_id", googleUser.id)
+    .maybeSingle();
+  if (lookupError) {
+    console.error("Failed to check for an existing Google account.", lookupError);
+    return jsonResponse(500, {
+      error: "Registration could not be completed. Please try again.",
+    });
   }
-  if (isWithinRateLimit !== true) {
-    return jsonResponse(429, { error: "Too many registration attempts. Try again later." });
+  if (existingAccount) {
+    return await registrationResponse(
+      existingAccount,
+      username,
+      firstName,
+      lastName,
+      serviceRoleKey,
+    );
   }
 
-  const normalizedUsername = username.toLowerCase();
-  const passwordHash = await hashPassword(password);
-  const realIdSecret = Deno.env.get("REALID_HMAC_SECRET");
-  if (!realIdSecret) {
-    console.error("REALID_HMAC_SECRET is not configured.");
-    return jsonResponse(500, { error: "Registration service is not configured." });
-  }
-  let realIdHash: string;
-  try {
-    realIdHash = await hashThaiNationalId(nationalId, realIdSecret);
-  } catch (error) {
-    console.error("Failed to protect the citizen ID.", error);
-    return jsonResponse(500, { error: "Registration service is not configured." });
-  }
   const { data, error: profileError } = await supabase
     .from("Users")
     .insert({
-      firstname: firstName,
-      lastname: lastName,
-      username: normalizedUsername,
-      role,
-      password: passwordHash,
-      realid: realIdHash,
+      google_auth_user_id: googleUser.id,
+      "Display Name": displayname,
+      role: "User",
+      created_at: new Date().toISOString(),
+      status: "active",
     })
-    .select("id, username, firstname, lastname, role")
+    .select("google_auth_user_id, uid, status, \"Display Name\", role")
     .single();
 
   if (profileError) {
     console.error("Failed to insert registration data into Users table.", profileError);
+    if (profileError.code === "23505") {
+      const { data: accountAfterConflict, error: conflictLookupError } =
+        await supabase
+          .from("Users")
+          .select("google_auth_user_id, uid, status, \"Display Name\", role")
+          .eq("google_auth_user_id", googleUser.id)
+          .maybeSingle();
+      if (conflictLookupError) {
+        console.error(
+          "Failed to reload the account after a registration conflict.",
+          conflictLookupError,
+        );
+        return jsonResponse(500, {
+          error: "Registration could not be completed. Please try again.",
+        });
+      }
+      if (accountAfterConflict) {
+        return await registrationResponse(
+          accountAfterConflict,
+          username,
+          firstName,
+          lastName,
+          serviceRoleKey,
+        );
+      }
+    }
     const uniquenessConflict = profileError.code === "23505";
     return jsonResponse(uniquenessConflict ? 409 : 500, {
       error: uniquenessConflict
-        ? "Username or citizen ID is already registered."
+        ? "This Google email or generated username is already registered."
         : "Registration could not be completed. Please try again.",
     });
   }
 
-  const user: TemporaryUser = {
-    id: String(data.id),
-    username: data.username,
-    firstname: data.firstname,
-    lastname: data.lastname,
-    role: data.role,
-  };
-  const session = await createTemporarySession(user, serviceRoleKey);
-  return jsonResponse(201, { ...user, ...session });
+  return await registrationResponse(
+    data,
+    username,
+    firstName,
+    lastName,
+    serviceRoleKey,
+  );
 });

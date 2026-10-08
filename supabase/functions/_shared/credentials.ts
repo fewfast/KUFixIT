@@ -1,6 +1,3 @@
-const passwordIterations = 600_000;
-const passwordHashLength = 256;
-const passwordSaltLength = 16;
 const sessionLifetimeSeconds = 8 * 60 * 60;
 
 const encoder = new TextEncoder();
@@ -17,73 +14,6 @@ function fromBase64Url(value: string): Uint8Array {
   return Uint8Array.from(atob(padded), (character) => character.charCodeAt(0));
 }
 
-async function derivePasswordHash(
-  password: string,
-  salt: Uint8Array,
-): Promise<Uint8Array> {
-  const key = await crypto.subtle.importKey(
-    "raw",
-    encoder.encode(password),
-    "PBKDF2",
-    false,
-    ["deriveBits"],
-  );
-  const bits = await crypto.subtle.deriveBits(
-    {
-      name: "PBKDF2",
-      hash: "SHA-256",
-      salt,
-      iterations: passwordIterations,
-    },
-    key,
-    passwordHashLength,
-  );
-  return new Uint8Array(bits);
-}
-
-export async function hashPassword(password: string): Promise<string> {
-  const salt = crypto.getRandomValues(new Uint8Array(passwordSaltLength));
-  const hash = await derivePasswordHash(password, salt);
-  return [
-    "pbkdf2-sha256",
-    passwordIterations,
-    toBase64Url(salt),
-    toBase64Url(hash),
-  ].join("$");
-}
-
-export async function verifyPassword(
-  password: string,
-  encodedHash: string,
-): Promise<boolean> {
-  try {
-    const [algorithm, iterationText, saltText, hashText, extra] =
-      encodedHash.split("$");
-    const iterations = Number(iterationText);
-    if (
-      algorithm !== "pbkdf2-sha256" ||
-      iterations !== passwordIterations ||
-      !saltText ||
-      !hashText ||
-      extra !== undefined
-    ) {
-      return false;
-    }
-
-    const expected = fromBase64Url(hashText);
-    const actual = await derivePasswordHash(password, fromBase64Url(saltText));
-    if (actual.length !== expected.length) return false;
-
-    let difference = 0;
-    for (let index = 0; index < actual.length; index++) {
-      difference |= actual[index] ^ expected[index];
-    }
-    return difference === 0;
-  } catch {
-    return false;
-  }
-}
-
 export type TemporaryUser = {
   id: string;
   username: string;
@@ -95,9 +25,16 @@ export type TemporaryUser = {
 export async function createTemporarySession(
   user: TemporaryUser,
   signingSecret: string,
+  requestedExpiresAt?: number,
 ): Promise<{ accessToken: string; expiresAt: number }> {
   const issuedAt = Math.floor(Date.now() / 1000);
-  const expiresAt = issuedAt + sessionLifetimeSeconds;
+  const expiresAt = Math.min(
+    issuedAt + sessionLifetimeSeconds,
+    requestedExpiresAt ?? Number.POSITIVE_INFINITY,
+  );
+  if (!Number.isFinite(expiresAt) || expiresAt <= issuedAt) {
+    throw new Error("Temporary session expiration must be in the future.");
+  }
   const header = toBase64Url(
     encoder.encode(JSON.stringify({ alg: "HS256", typ: "JWT" })),
   );

@@ -4,6 +4,9 @@ verify_jwt = false
 [functions.login-user]
 verify_jwt = false
 
+[functions.staff-login]
+verify_jwt = false
+
 [functions.update-user-profile]
 verify_jwt = false
 

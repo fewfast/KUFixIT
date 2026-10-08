@@ -1,9 +1,10 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import {
   createTemporarySession,
-  verifyPassword,
   type TemporaryUser,
 } from "../_shared/credentials.ts";
+import { bearerToken, verifyGoogleUser } from "../_shared/google_auth.ts";
+import { getSupabaseAdminKey } from "../_shared/supabase_admin_key.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -28,134 +29,55 @@ Deno.serve(async (request) => {
   }
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL");
-  const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  const serviceRoleKey = getSupabaseAdminKey();
   if (!supabaseUrl || !serviceRoleKey) {
     console.error("Supabase server configuration is missing.");
     return jsonResponse(500, { error: "Sign-in service is not configured." });
   }
 
-  let payload: Record<string, unknown>;
-  try {
-    const value: unknown = await request.json();
-    if (typeof value !== "object" || value === null || Array.isArray(value)) {
-      return jsonResponse(400, { error: "Invalid request body." });
-    }
-    payload = value as Record<string, unknown>;
-  } catch {
-    return jsonResponse(400, { error: "Invalid JSON request body." });
-  }
-
-  const username =
-    typeof payload.username === "string" ? payload.username.trim() : "";
-  const password =
-    typeof payload.password === "string" ? payload.password : "";
-  if (!username || !password) {
-    return jsonResponse(400, { error: "Username and password are required." });
-  }
-  if (!/^[a-zA-Z0-9_-]{3,30}$/.test(username) || password.length > 128) {
-    return jsonResponse(401, { error: "Username or password is incorrect." });
-  }
-
-  const clientIp =
-    request.headers.get("cf-connecting-ip") ??
-    request.headers.get("x-forwarded-for")?.split(",").at(-1)?.trim();
-  if (!clientIp) {
-    console.error("Unable to determine client IP for sign-in rate limiting.");
-    return jsonResponse(503, { error: "Sign-in service is temporarily unavailable." });
-  }
-
   const supabase = createClient(supabaseUrl, serviceRoleKey, {
     auth: { autoRefreshToken: false, persistSession: false },
   });
-  const ipKey = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(serviceRoleKey),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const ipDigest = await crypto.subtle.sign(
-    "HMAC",
-    ipKey,
-    new TextEncoder().encode(`login:${clientIp}`),
-  );
-  const ipHash = Array.from(new Uint8Array(ipDigest), (byte) =>
-    byte.toString(16).padStart(2, "0")
-  ).join("");
-  const { data: isWithinRateLimit, error: rateLimitError } = await supabase.rpc(
-    "consume_registration_rate_limit",
-    { p_ip_hash: ipHash, p_limit: 20, p_window_seconds: 3600 },
-  );
-  if (rateLimitError) {
-    console.error("Sign-in rate-limit check failed.", rateLimitError);
-    return jsonResponse(503, { error: "Sign-in service is temporarily unavailable." });
+  const token = bearerToken(request);
+  if (!token) {
+    return jsonResponse(401, { error: "Sign in with Google to continue." });
   }
-  if (isWithinRateLimit !== true) {
-    return jsonResponse(429, { error: "Too many sign-in attempts. Try again later." });
+  const googleUser = await verifyGoogleUser(supabase, token);
+  if (!googleUser) {
+    return jsonResponse(401, { error: "A valid Google account is required." });
   }
 
-  const normalizedUsername = username.toLowerCase();
-  const { data, error } = await supabase
+  const { data: account, error } = await supabase
     .from("Users")
-    .select("id, username, firstname, lastname, role, password")
-    .eq("username", normalizedUsername)
-    .limit(20);
+    .select("google_auth_user_id, uid, status, \"Display Name\", role")
+    .eq("google_auth_user_id", googleUser.id)
+    .maybeSingle();
   if (error) {
     console.error("Failed to load account for sign-in.", error);
     return jsonResponse(500, { error: "Sign-in could not be completed." });
   }
-  if (!data || data.length === 0) {
-    return jsonResponse(401, { error: "Username or password is incorrect." });
-  }
-
-  const matchingUsers = [];
-  for (const candidate of data) {
-    if (typeof candidate.password !== "string") continue;
-
-    if (await verifyPassword(password, candidate.password)) {
-      matchingUsers.push(candidate);
-      continue;
-    }
-
-    if (
-      !candidate.password.startsWith("pbkdf2-sha256$") &&
-      candidate.password === password
-    ) {
-      const upgradedHash = await hashPassword(password);
-      const { data: upgradedAccount, error: upgradeError } = await supabase
-        .from("Users")
-        .update({ password: upgradedHash })
-        .eq("id", candidate.id)
-        .eq("password", candidate.password)
-        .select("id")
-        .maybeSingle();
-
-      if (upgradeError) {
-        console.error("Failed to upgrade legacy account password hash.", upgradeError);
-        return jsonResponse(500, { error: "Sign-in could not be completed." });
-      }
-      if (upgradedAccount) {
-        matchingUsers.push(candidate);
-      }
-    }
-  }
-  if (matchingUsers.length === 0) {
-    return jsonResponse(401, { error: "Username or password is incorrect." });
-  }
-  if (matchingUsers.length > 1 || data.length === 20) {
-    return jsonResponse(409, {
-      error: "Multiple accounts use this username. Contact an administrator.",
+  if (!account) {
+    return jsonResponse(404, {
+      error: "No KUFixIT account is registered with this Google account. Please register first.",
+      code: "google_account_not_registered",
     });
   }
 
-  const account = matchingUsers[0];
+  const displayNameParts = account["Display Name"].trim().split(/\s+/);
   const user: TemporaryUser = {
-    id: String(account.id),
-    username: account.username,
-    firstname: account.firstname,
-    lastname: account.lastname,
+    id: account.google_auth_user_id,
+    username: `u_${account.google_auth_user_id.replaceAll("-", "").slice(0, 26)}`,
+    firstname: displayNameParts.shift() ?? account["Display Name"],
+    lastname: displayNameParts.join(" "),
     role: account.role,
   };
   const session = await createTemporarySession(user, serviceRoleKey);
-  return jsonResponse(200, { ...user, ...session });
+  return jsonResponse(200, {
+    ...user,
+    uid: account.uid,
+    status: account.status,
+    displayname: account["Display Name"],
+    hasNationalId: false,
+    ...session,
+  });
 });

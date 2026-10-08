@@ -1,11 +1,9 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 
-import '../auth/account_identity.dart';
 import '../auth/function_error_message.dart';
 import '../auth/temporary_account_session.dart';
 import '../database/connect.dart';
@@ -22,11 +20,6 @@ class PersonalInfoPage extends StatefulWidget {
 class _PersonalInfoPageState extends State<PersonalInfoPage> {
   static const _maxAvatarSizeBytes = 5 * 1024 * 1024;
   late final TextEditingController _firstNameController;
-  late final TextEditingController _lastNameController;
-  late final TextEditingController _usernameController;
-  late final TextEditingController _nationalIdController;
-  late final TextEditingController _newPasswordController;
-  late final TextEditingController _confirmPasswordController;
   final _formKey = GlobalKey<FormState>();
   final _imagePicker = ImagePicker();
   bool _isSubmitting = false;
@@ -34,29 +27,17 @@ class _PersonalInfoPageState extends State<PersonalInfoPage> {
   bool _isLoadingAvatar = true;
   bool _isUploadingAvatar = false;
   late String _savedFirstName;
-  late String _savedLastName;
-  late String _savedUsername;
   String? _avatarUrl;
   String? _avatarErrorMessage;
   String? _errorMessage;
-
-  bool get _requiresNationalId =>
-      _newPasswordController.text.isNotEmpty ||
-      _usernameController.text.trim().toLowerCase() !=
-          _savedUsername.trim().toLowerCase();
 
   @override
   void initState() {
     super.initState();
     final account = widget.temporaryAccount;
     _firstNameController = TextEditingController(
-      text: account?.firstName ?? '',
+      text: account?.displayName ?? '',
     );
-    _lastNameController = TextEditingController(text: account?.lastName ?? '');
-    _usernameController = TextEditingController(text: account?.username ?? '');
-    _nationalIdController = TextEditingController();
-    _newPasswordController = TextEditingController();
-    _confirmPasswordController = TextEditingController();
     _saveCurrentValues();
     if (SupabaseConnection.isInitialized) {
       _loadAvatar();
@@ -68,11 +49,6 @@ class _PersonalInfoPageState extends State<PersonalInfoPage> {
   @override
   void dispose() {
     _firstNameController.dispose();
-    _lastNameController.dispose();
-    _usernameController.dispose();
-    _nationalIdController.dispose();
-    _newPasswordController.dispose();
-    _confirmPasswordController.dispose();
     super.dispose();
   }
 
@@ -80,7 +56,7 @@ class _PersonalInfoPageState extends State<PersonalInfoPage> {
   Widget build(BuildContext context) {
     final account = widget.temporaryAccount;
     final role = account?.role ?? 'User';
-    final uid = account?.id ?? '';
+    final uid = account?.uid?.toString() ?? 'ยังไม่ได้ระบุ';
 
     return Scaffold(
       appBar: AppBar(title: const Text('ข้อมูลส่วนตัว')),
@@ -190,124 +166,24 @@ class _PersonalInfoPageState extends State<PersonalInfoPage> {
                             buildCounter: _hideCharacterCounter,
                             onChanged: (_) => setState(() {}),
                             decoration: const InputDecoration(
-                              labelText: 'ชื่อจริง',
+                              labelText: 'ชื่อที่แสดง',
                               border: OutlineInputBorder(),
                             ),
                             validator: (value) =>
-                                _validateName(value, 'ชื่อจริง'),
+                                _validateName(value, 'ชื่อที่แสดง'),
                           ),
                           const SizedBox(height: 16),
-                          _characterCount(_lastNameController, 80),
-                          TextFormField(
-                            controller: _lastNameController,
-                            textCapitalization: TextCapitalization.words,
-                            maxLength: 80,
-                            buildCounter: _hideCharacterCounter,
-                            onChanged: (_) => setState(() {}),
-                            decoration: const InputDecoration(
-                              labelText: 'นามสกุล',
-                              border: OutlineInputBorder(),
-                            ),
-                            validator: (value) =>
-                                _validateName(value, 'นามสกุล'),
-                          ),
-                          const SizedBox(height: 16),
-                          _characterCount(_usernameController, 30),
-                          TextFormField(
-                            controller: _usernameController,
-                            autocorrect: false,
-                            enableSuggestions: false,
-                            maxLength: 30,
-                            buildCounter: _hideCharacterCounter,
-                            onChanged: (_) => setState(() {}),
-                            decoration: const InputDecoration(
-                              labelText: 'ชื่อบัญชี',
-                              helperText: 'ใช้ a-z, 0-9, _ หรือ - (3-30 ตัว)',
-                              border: OutlineInputBorder(),
-                            ),
-                            validator: _validateUsername,
-                          ),
-                          const SizedBox(height: 16),
-                          TextFormField(
-                            controller: _newPasswordController,
-                            obscureText: true,
-                            maxLength: 128,
-                            buildCounter: _hideCharacterCounter,
-                            onChanged: (value) {
-                              if (value.isEmpty) {
-                                _confirmPasswordController.clear();
-                                if (_usernameController.text
-                                        .trim()
-                                        .toLowerCase() ==
-                                    _savedUsername.trim().toLowerCase()) {
-                                  _nationalIdController.clear();
-                                }
-                              }
-                              setState(() {});
-                            },
-                            decoration: const InputDecoration(
-                              labelText: 'รหัสผ่านใหม่ (เว้นว่างถ้าไม่เปลี่ยน)',
-                              border: OutlineInputBorder(),
-                            ),
-                            validator: _validateNewPassword,
-                          ),
-                          if (_newPasswordController.text.isNotEmpty) ...[
-                            const SizedBox(height: 8),
-                            _buildPasswordChecklist(context),
-                            const SizedBox(height: 16),
-                            TextFormField(
-                              controller: _confirmPasswordController,
-                              obscureText: true,
-                              maxLength: 128,
-                              buildCounter: _hideCharacterCounter,
-                              onChanged: (_) => setState(() {}),
-                              decoration: const InputDecoration(
-                                labelText: 'ยืนยันรหัสผ่านใหม่',
-                                border: OutlineInputBorder(),
-                              ),
-                              validator: _validateConfirmPassword,
-                            ),
-                          ],
-                          if (_requiresNationalId) ...[
-                            const SizedBox(height: 16),
-                            TextFormField(
-                              controller: _nationalIdController,
-                              keyboardType: TextInputType.number,
-                              inputFormatters: [
-                                FilteringTextInputFormatter.digitsOnly,
-                              ],
-                              maxLength: 13,
-                              buildCounter: _hideCharacterCounter,
-                              onChanged: (_) => setState(() {}),
-                              decoration: const InputDecoration(
-                                labelText: 'เลขบัตรประชาชนเพื่อยืนยัน',
-                                helperText:
-                                    'กรอกตัวเลข 13 หลักเดียวกับตอนสมัครเพื่อเปลี่ยน Username หรือรหัสผ่าน',
-                                border: OutlineInputBorder(),
-                              ),
-                              validator: _validateNationalId,
-                            ),
-                          ],
+                          _InformationRow(label: 'เลขบัญชี', value: uid),
                         ] else ...[
                           _InformationRow(
-                            label: 'ชื่อจริง',
+                            label: 'ชื่อที่แสดง',
                             value: _displayValue(_firstNameController.text),
                           ),
                           const SizedBox(height: 12),
-                          _InformationRow(
-                            label: 'นามสกุล',
-                            value: _displayValue(_lastNameController.text),
-                          ),
-                          const SizedBox(height: 12),
-                          _InformationRow(
-                            label: 'ชื่อบัญชี',
-                            value: _displayValue(_usernameController.text),
-                          ),
+                          _InformationRow(label: 'เลขบัญชี', value: uid),
                         ],
                         const SizedBox(height: 12),
                         _InformationRow(label: 'บทบาท', value: role),
-                        const SizedBox(height: 12),
-                        _InformationRow(label: 'เลขบัญชี', value: uid),
                         if (_errorMessage case final error?) ...[
                           const SizedBox(height: 12),
                           Text(
@@ -376,29 +252,16 @@ class _PersonalInfoPageState extends State<PersonalInfoPage> {
 
   void _saveCurrentValues() {
     _savedFirstName = _firstNameController.text;
-    _savedLastName = _lastNameController.text;
-    _savedUsername = _usernameController.text;
   }
 
   void _cancelEditing() {
     _formKey.currentState?.reset();
     _firstNameController.text = _savedFirstName;
-    _lastNameController.text = _savedLastName;
-    _usernameController.text = _savedUsername;
-    _clearSensitiveInputs();
     setState(() {
       _isEditing = false;
       _errorMessage = null;
       _avatarErrorMessage = null;
     });
-  }
-
-  String? _validateUsername(String? value) {
-    final username = value?.trim() ?? '';
-    if (!RegExp(r'^[a-zA-Z0-9_-]{3,30}$').hasMatch(username)) {
-      return 'ชื่อบัญชีต้องมี 3-30 ตัว และใช้ได้เฉพาะ a-z, 0-9, _ หรือ -';
-    }
-    return null;
   }
 
   Widget? _hideCharacterCounter(
@@ -410,34 +273,6 @@ class _PersonalInfoPageState extends State<PersonalInfoPage> {
     return null;
   }
 
-  Widget _buildPasswordChecklist(BuildContext context) {
-    final checks = passwordRequirementStatus(
-      _newPasswordController.text,
-    ).entries;
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text('ตรวจสอบรหัสผ่าน', style: Theme.of(context).textTheme.titleSmall),
-        const SizedBox(height: 4),
-        for (final check in checks)
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 2),
-            child: Text(
-              check.key == 'อักขระอย่างน้อย 8 ตัว'
-                  ? '${check.key} (${_newPasswordController.text.length}/128)'
-                  : check.key,
-              style: TextStyle(
-                color: check.value
-                    ? Colors.green.shade700
-                    : Theme.of(context).colorScheme.error,
-              ),
-            ),
-          ),
-      ],
-    );
-  }
-
   Widget _characterCount(TextEditingController controller, int maxLength) {
     return Align(
       alignment: Alignment.centerRight,
@@ -446,38 +281,6 @@ class _PersonalInfoPageState extends State<PersonalInfoPage> {
         style: Theme.of(context).textTheme.bodySmall,
       ),
     );
-  }
-
-  String? _validateNationalId(String? value) {
-    if (!_requiresNationalId) return null;
-    final nationalId = value ?? '';
-    if (nationalId.isEmpty) return 'กรุณากรอกเลขบัตรประชาชน';
-    if (!RegExp(r'^\d{13}$').hasMatch(nationalId)) {
-      return 'กรุณากรอกตัวเลข 13 หลัก';
-    }
-    return null;
-  }
-
-  String? _validateNewPassword(String? value) {
-    final password = value ?? '';
-    if (password.isEmpty) return null;
-    if (!isStrongPassword(password)) {
-      return 'รหัสผ่านต้องมีอย่างน้อย 8 ตัว และมีตัวพิมพ์ใหญ่ พิมพ์เล็ก ตัวเลข และอักษรพิเศษ';
-    }
-    return null;
-  }
-
-  String? _validateConfirmPassword(String? value) {
-    final password = _newPasswordController.text;
-    if (password.isEmpty && (value ?? '').isEmpty) return null;
-    if ((value ?? '') != password) return 'รหัสผ่านใหม่ไม่ตรงกัน';
-    return null;
-  }
-
-  void _clearSensitiveInputs() {
-    _nationalIdController.clear();
-    _newPasswordController.clear();
-    _confirmPasswordController.clear();
   }
 
   Future<void> _loadAvatar() async {
@@ -632,12 +435,7 @@ class _PersonalInfoPageState extends State<PersonalInfoPage> {
 
   Future<void> _save() async {
     if (!_formKey.currentState!.validate()) return;
-    final firstName = _firstNameController.text.trim();
-    final lastName = _lastNameController.text.trim();
-    final username = _usernameController.text.trim().toLowerCase();
-    final nationalId = _nationalIdController.text;
-    final newPassword = _newPasswordController.text;
-
+    final displayName = _firstNameController.text.trim();
     setState(() {
       _isSubmitting = true;
       _errorMessage = null;
@@ -654,34 +452,19 @@ class _PersonalInfoPageState extends State<PersonalInfoPage> {
       await SupabaseConnection.client.functions.invoke(
         'update-user-profile',
         headers: {'Authorization': 'Bearer ${account.accessToken}'},
-        body: {
-          'firstName': firstName,
-          'lastName': lastName,
-          'username': username,
-          'nationalId': nationalId,
-          'newPassword': newPassword.isEmpty ? null : newPassword,
-        },
+        body: {'displayName': displayName},
       );
       TemporaryAccountSession.instance.updateProfile(
-        firstName: firstName,
-        lastName: lastName,
-        username: username,
+        displayName: displayName,
       );
 
       if (mounted) {
         setState(() {
           _saveCurrentValues();
-          _clearSensitiveInputs();
           _isEditing = false;
         });
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              newPassword.isEmpty
-                  ? 'บันทึกข้อมูลเรียบร้อยแล้ว'
-                  : 'บันทึกข้อมูลและเปลี่ยนรหัสผ่านเรียบร้อยแล้ว',
-            ),
-          ),
+          const SnackBar(content: Text('บันทึกข้อมูลเรียบร้อยแล้ว')),
         );
       }
     } on Exception catch (error) {
@@ -693,7 +476,6 @@ class _PersonalInfoPageState extends State<PersonalInfoPage> {
         ),
       );
     } finally {
-      _clearSensitiveInputs();
       if (mounted) setState(() => _isSubmitting = false);
     }
   }

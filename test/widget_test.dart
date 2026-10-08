@@ -46,6 +46,34 @@ void main() {
     expect(find.text('จัดการผู้ใช้'), findsNothing);
   });
 
+  testWidgets('User drawer shows the database UID and role', (tester) async {
+    final expiresAt =
+        DateTime.now().add(const Duration(hours: 1)).millisecondsSinceEpoch ~/
+        1000;
+    TemporaryAccountSession.instance.setFromResponse({
+      'id': '79f01ec0-1234-4321-9321-123456789abc',
+      'username': 'test_user',
+      'uid': 1234567890,
+      'firstname': 'Test',
+      'lastname': 'User',
+      'role': 'User',
+      'accessToken': 'signed-token',
+      'expiresAt': expiresAt,
+    });
+
+    await tester.pumpWidget(const MaterialApp(home: Layout()));
+    await tester.tap(find.byTooltip('เปิดเมนู'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('UID: 1234567890'), findsOneWidget);
+    expect(find.text('Role: User'), findsOneWidget);
+    expect(
+      find.text('UID: 79f01ec0-1234-4321-9321-123456789abc'),
+      findsNothing,
+    );
+    TemporaryAccountSession.instance.clear();
+  });
+
   testWidgets('Unsign role gets public ticket monitor navigation', (
     tester,
   ) async {
@@ -60,6 +88,7 @@ void main() {
     await tester.tap(find.byTooltip('เปิดเมนู'));
     await tester.pumpAndSettle();
 
+    expect(find.textContaining('UID:'), findsNothing);
     expect(find.text('ติดตามงานซ่อม'), findsNWidgets(2));
     expect(find.text('หน้าหลัก'), findsNothing);
     expect(find.text('แจ้งซ่อม'), findsNothing);
@@ -74,31 +103,46 @@ void main() {
 
     await tester.tap(find.byTooltip('เข้าสู่ระบบ'));
     await tester.pumpAndSettle();
+    expect(find.text('เข้าสู่ระบบด้วย Google'), findsOneWidget);
+    expect(find.text('รหัสผ่าน'), findsNothing);
     await tester.tap(find.text('ยังไม่มีบัญชี? สมัครสมาชิก'));
     await tester.pumpAndSettle();
 
     expect(find.text('สมัครสมาชิก KUFixIT'), findsOneWidget);
-    expect(find.text('ชื่อจริง'), findsOneWidget);
-    expect(find.text('นามสกุล'), findsOneWidget);
-    expect(find.text('Username'), findsOneWidget);
-    expect(find.text('รหัสผ่าน'), findsOneWidget);
-    expect(find.text('สร้างบัญชี'), findsOneWidget);
-    final roleDropdown = find.byType(DropdownButtonFormField<String>);
-    await tester.ensureVisible(roleDropdown);
-    await tester.tap(roleDropdown);
-    await tester.pumpAndSettle();
-    expect(find.text('Admin'), findsOneWidget);
-    await tester.tap(find.text('SuperAdmin'));
-    await tester.pumpAndSettle();
-    expect(find.text('SuperAdmin'), findsOneWidget);
+    expect(find.text('สมัครด้วย Google'), findsOneWidget);
+    expect(find.byType(TextFormField), findsNothing);
+    expect(find.text('รหัสผ่าน'), findsNothing);
+    expect(find.text('สร้างบัญชี'), findsNothing);
+    expect(find.byType(DropdownButtonFormField<String>), findsNothing);
   });
 
-  testWidgets('personal info page shows the temporary account names', (
+  testWidgets('staff login form is reachable from the login dialog', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      const MaterialApp(home: Layout(roleOverride: 'Unsign')),
+    );
+
+    await tester.tap(find.byTooltip('เข้าสู่ระบบ'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('เข้าสู่ระบบช่างและเจ้าหน้าที่ระดับสูง'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('ชื่อผู้ใช้'), findsOneWidget);
+    expect(find.text('รหัสผ่าน'), findsOneWidget);
+    expect(
+      find.text('เข้าสู่ระบบช่างและเจ้าหน้าที่ระดับสูง'),
+      findsNWidgets(2),
+    );
+  });
+
+  testWidgets('personal info page shows display name and 10-digit UID', (
     tester,
   ) async {
     final account = TemporaryAccount(
       id: '1234567890',
       username: 'test_user',
+      uid: 1234567890,
       firstName: 'Ada',
       lastName: 'Lovelace',
       role: 'User',
@@ -112,9 +156,11 @@ void main() {
 
     expect(find.text('ข้อมูลส่วนตัว'), findsOneWidget);
     expect(find.text('รูปโปรไฟล์ปัจจุบัน'), findsOneWidget);
-    expect(find.text('Ada'), findsOneWidget);
-    expect(find.text('Lovelace'), findsOneWidget);
-    expect(find.text('ชื่อบัญชี'), findsOneWidget);
+    expect(find.text('Ada Lovelace'), findsOneWidget);
+    expect(find.text('ชื่อที่แสดง'), findsOneWidget);
+    expect(find.text('ชื่อจริง'), findsNothing);
+    expect(find.text('นามสกุล'), findsNothing);
+    expect(find.text('ชื่อบัญชี'), findsNothing);
     expect(find.text('อีเมลล์'), findsNothing);
     expect(find.text('บทบาท'), findsOneWidget);
     expect(find.text('User'), findsOneWidget);
@@ -122,55 +168,25 @@ void main() {
     expect(find.text('1234567890'), findsOneWidget);
     expect(find.text('แก้ไขข้อมูล'), findsOneWidget);
     expect(find.text('บันทึกข้อมูล'), findsNothing);
-    expect(
-      find.byWidgetPredicate(
-        (widget) =>
-            widget is TextFormField && widget.controller?.text == 'test_user',
-      ),
-      findsNothing,
-    );
+    expect(find.text('เลขบัญชี'), findsOneWidget);
     expect(find.text('เลขบัตรประชาชนเพื่อยืนยัน'), findsNothing);
 
     await tester.ensureVisible(find.text('แก้ไขข้อมูล'));
     await tester.tap(find.text('แก้ไขข้อมูล'));
     await tester.pumpAndSettle();
-    expect(
-      find.byWidgetPredicate(
-        (widget) =>
-            widget is TextFormField && widget.controller?.text == 'test_user',
-      ),
-      findsOneWidget,
-    );
+    expect(find.text('ชื่อที่แสดง'), findsOneWidget);
+    expect(find.text('เลขบัญชี'), findsOneWidget);
+    expect(find.text('นามสกุล'), findsNothing);
+    expect(find.text('ชื่อบัญชี'), findsNothing);
     expect(find.text('เลขบัตรประชาชนเพื่อยืนยัน'), findsNothing);
-    expect(find.text('รหัสผ่านใหม่ (เว้นว่างถ้าไม่เปลี่ยน)'), findsOneWidget);
+    expect(find.text('รหัสผ่านใหม่ (เว้นว่างถ้าไม่เปลี่ยน)'), findsNothing);
     expect(find.text('ยืนยันรหัสผ่านใหม่'), findsNothing);
-    expect(find.text('3/80'), findsOneWidget);
-    expect(find.text('8/80'), findsOneWidget);
-    expect(find.text('9/30'), findsOneWidget);
+    expect(find.text('12/80'), findsOneWidget);
     expect(
       find.text('แตะรูปเพื่อเปลี่ยนรูปโปรไฟล์ (ไม่เกิน 5 MB)'),
       findsOneWidget,
     );
     expect(find.text('บันทึกข้อมูล'), findsOneWidget);
-
-    await tester.enterText(
-      find.widgetWithText(
-        TextFormField,
-        'รหัสผ่านใหม่ (เว้นว่างถ้าไม่เปลี่ยน)',
-      ),
-      'StrongPass1!',
-    );
-    await tester.pumpAndSettle();
-    expect(find.text('ยืนยันรหัสผ่านใหม่'), findsOneWidget);
-    expect(find.text('เลขบัตรประชาชนเพื่อยืนยัน'), findsOneWidget);
-    expect(find.text('ตรวจสอบรหัสผ่าน'), findsOneWidget);
-    expect(find.text('อักขระอย่างน้อย 8 ตัว (12/128)'), findsOneWidget);
-    expect(find.text('ตัวเลขอย่างน้อย 1 ตัวเลข'), findsOneWidget);
-    expect(find.text('ตัวอักษรพิมพ์เล็กอย่างน้อย 1 ตัวอักษร'), findsOneWidget);
-    expect(find.text('ตัวอักษรพิมพ์ใหญ่อย่างน้อย 1 ตัวอักษร'), findsOneWidget);
-    expect(find.text('ตัวอักษรพิเศษอย่างน้อย 1 ตัวอักษร'), findsOneWidget);
-    expect(find.text('0/128'), findsNothing);
-    expect(find.text('0/13'), findsNothing);
 
     await tester.ensureVisible(find.text('ยกเลิก'));
     await tester.tap(find.text('ยกเลิก'));
@@ -181,15 +197,11 @@ void main() {
     await tester.ensureVisible(find.text('แก้ไขข้อมูล'));
     await tester.tap(find.text('แก้ไขข้อมูล'));
     await tester.pumpAndSettle();
-    final usernameField = find.byType(TextFormField).at(2);
-    await tester.enterText(usernameField, 'updated_user');
-    await tester.pumpAndSettle();
-    expect(find.text('เลขบัตรประชาชนเพื่อยืนยัน'), findsOneWidget);
-    expect(find.text('ยืนยันรหัสผ่านใหม่'), findsNothing);
-
-    await tester.enterText(usernameField, 'test_user');
+    final displayNameField = find.byType(TextFormField).first;
+    await tester.enterText(displayNameField, 'Updated Display Name');
     await tester.pumpAndSettle();
     expect(find.text('เลขบัตรประชาชนเพื่อยืนยัน'), findsNothing);
+    expect(find.text('ยืนยันรหัสผ่านใหม่'), findsNothing);
   });
 
   testWidgets('reopening the drawer while it closes keeps the page visible', (

@@ -21,72 +21,92 @@ retry page if the connection check fails.
 
 ## Registration and roles
 
-The registration screen asks for first and last name, Thai national ID,
-username, password, and role. National IDs must be exactly 13 ASCII digits;
-there is no checksum validation. IDs are stored only as a keyed HMAC-SHA-256
-digest in `public."Users".realid`; the raw ID is not stored or returned by the
-Edge Function. Passwords must be 8-128
-characters and include lowercase, uppercase, numeric, and symbol characters.
-Registration does not create a Supabase Auth user. Passwords are PBKDF2-SHA-256
-hashed in the `register-user` Edge Function and the encoded hash is stored in
-`public."Users".password`; plaintext is never stored. The `login-user` Edge
-Function verifies the password hash and issues an 8-hour signed temporary
-session, held in app memory. Profile edits and password changes require the
-same national ID entered at registration. Password changes are optional in the
-profile edit form. A legacy plaintext password is replaced with a PBKDF2 hash
-immediately after a successful login.
+Registration and sign-in use Google OAuth through Supabase Auth. Registration
+shows only the Google sign-in action; after Google authentication succeeds,
+the app automatically creates the KUFixIT account. The Google profile name is
+stored as both `"Display Name"` and `displayname`, `created_at` is assigned by
+the database, and every account is assigned the `User` role. A generated username is stored for compatibility with the
+app. Each Google Auth user ID can register one KUFixIT account. The
+`register-user` and `login-user` Edge Functions verify the Google-authenticated
+Supabase session and issue an 8-hour signed temporary session, held in app
+memory.
 
-National IDs are highly sensitive personal data. Use this feature only with a
-clear purpose and appropriate notice/consent, access controls, retention
-limits, and incident procedures under applicable privacy law. A keyed HMAC
-supports equality checks but does not verify identity against a government
-source. Keep `REALID_HMAC_SECRET` private and stable; changing it prevents
-existing IDs from matching. Existing accounts without a stored digest cannot
-edit their profiles and must register a new account, as the app does not
-silently enroll an unverified ID for an existing account.
+Technicians and elevated staff use the separate username/password action in
+the login dialog. Migration `20261008000010_systems_users_login.sql` creates
+`public."Systems_Users"` with `"Username"`, bcrypt-hashed `"Password"`, `role`,
+`created_at`, and optional `endtime`. Allowed staff roles are `Technician`,
+`Admin`, and `SuperAdmin`; a null `endtime` means the account does not expire.
+Staff login sessions expire at the earlier of the normal 8-hour session limit
+or the account's `endtime`. The Edge Function verifies the hash in a protected
+database function and never returns the password hash.
 
-Email collection, display, sign-in, and change-verification flows have been
-removed from the app. Existing Supabase Auth accounts are not migrated to the
-temporary username/password system. The migration removes
-`public."Users".email` and pending email-change requests but does not delete
-Supabase Auth users or other historical records automatically.
+Create staff accounts only through a trusted administrative SQL session. For
+example, replace the username and password below with the new account values;
+the database stores only the bcrypt hash:
 
-Apply the SQL migrations in `supabase/migrations`, then deploy the
-`supabase/functions/register-user`, `supabase/functions/login-user`, and
-`supabase/functions/update-user-profile` and
-`supabase/functions/profile-avatar` Edge Functions and set their
-`SUPABASE_SERVICE_ROLE_KEY` and `REALID_HMAC_SECRET` secrets before using
-registration or profile edits. The registration
-function inserts the account details directly into `public."Users"`; `id` is
-assigned as a random, unique 10-digit bigint. Migration
-`20261006000002_fix_existing_users_identity.sql` repairs older tables by
-adding an auto-generated `id` and allowing a legacy `password` column to be
-nullable. **Temporary development setting:** public registration currently
-permits anyone to select `User`,
-`Admin`, or `SuperAdmin`. Anyone can grant themselves elevated access while
-this is enabled. Restore server-side SuperAdmin authorization before production.
-Never grant roles from `user_metadata` or expose the service role key in the
-Flutter app.
-User and Admin profile photos are stored in private Storage buckets named for
-the account UID. The `profile-avatar` Edge Function creates a bucket on the
-first upload, replaces the previous `avatar` image on later uploads, and limits
+```sql
+insert into public."Systems_Users" (
+  "Username", "Password", role, endtime
+)
+values (
+  'technician1',
+  extensions.crypt('REPLACE_WITH_A_STRONG_PASSWORD', extensions.gen_salt('bf', 12)),
+  'Technician',
+  null
+);
+```
+
+Never grant staff roles from public registration or expose the service role
+key in the Flutter app.
+
+Before using Google sign-in, enable Google as a provider in Supabase Auth and
+configure its Google OAuth client credentials. Add
+`io.supabase.flutter://login-callback/` to the Supabase Auth redirect URL
+allowlist for Android and iOS. For Flutter Web, add the app's origin (for local
+development, for example, `http://localhost:3000`) to the Supabase Auth
+redirect URL allowlist; the app redirects back to the origin where it is
+running. Keep the web app running on that address while completing sign-in.
+Use the Supabase Auth callback URL shown in the dashboard as an authorized
+redirect URI in the Google OAuth client.
+If sign-in returns `Unsupported provider: provider is not enabled`, Google is
+not enabled in the Supabase project's Authentication > Sign In / Providers
+settings, or the provider credentials have not been configured.
+
+The account row stores `created_at`, `"Display Name"`, `role`, `status`, and
+`google_auth_user_id`. New registrations default to `status = 'active'`;
+existing accounts are backfilled as active. A separate `uid` is generated as
+a unique 10-digit number for each account; Google Auth UUID remains the
+authentication identity. The register and login responses include this `uid`
+and `status`. Existing username/password accounts are not
+linked to Google automatically; remove old rows manually before their users
+register again. Public registration always assigns `User`; elevated roles
+must be granted through a trusted administrative process. Never grant roles
+from `user_metadata` or expose the service role key in the Flutter app.
+
+Migration `20261008000008_sync_google_auth_users.sql` creates `Users` rows
+directly from verified Google Auth users, backfills Google users that already
+exist, removes legacy `Users` triggers that referenced columns absent from the
+current table, and installs a database trigger for future Google registrations.
+Migration `20261008000009_users_unique_ten_digit_uid.sql` adds and backfills the
+unique 10-digit `uid` and generates one for every new account.
+Migration `20261008000011_users_status.sql` adds the `status` column, marks
+existing accounts active, and keeps new Google registrations active.
+
+Profile photos are stored in private Storage buckets named for the account
+Google Auth UID. The `profile-avatar` Edge Function creates a bucket on first
+upload, replaces the previous `avatar` image on later uploads, and limits
 images to 5 MB. The app uses a signed URL to display the current image.
-The registration and sign-in functions use the configured per-IP rate limit.
-Gateway JWT verification is disabled so signed-out clients can call them; the
-login function issues its own signed temporary session token. Any future API
-that accepts this token must verify its signature and enforce permissions on
-the server. Client-side role state alone is not authorization, and Supabase RLS
-does not recognize this custom session as a Supabase Auth session.
-Migration `20261006000004_enforce_unique_usernames.sql` prevents new duplicate
-usernames, ignoring case and surrounding whitespace. Existing duplicate rows
-are not changed, and their username cannot be registered again. Temporary
-login can resolve an existing duplicate username only when exactly one row has
-a matching PBKDF2 password hash; otherwise it asks the user to contact an
-administrator.
-Migration `20261008000000_users_ten_digit_ids.sql` configures new user IDs to
-use the 10-digit range. Migration
-`20261008000001_users_random_ten_digit_ids.sql` assigns a random unused ID to
-each new account; IDs already assigned to existing users are not changed.
+Google registration, sign-in, and profile updates do not use the
+application-level per-IP rate limit. Migration
+`20261008000007_remove_rate_limit.sql` removes the shared counter table and
+database function.
+Gateway JWT verification is disabled so clients can reach the functions.
+Google account functions verify the Google Supabase Auth token; `staff-login`
+checks credentials via the restricted database function. Both login flows
+issue signed temporary session tokens. Any future API that accepts these
+tokens must verify their signature and enforce permissions on the server.
+Client-side role state alone is not authorization, and Supabase RLS does not
+recognize this custom session as a Supabase Auth session.
 
 To deploy to the same Supabase project configured in `.env`, install the
 Supabase CLI, authenticate with `supabase login`, and run:
@@ -100,17 +120,12 @@ supabase functions deploy update-user-profile
 supabase functions deploy profile-avatar
 ```
 
-Set `SUPABASE_SERVICE_ROLE_KEY` for the Edge Function from the Supabase
-Dashboard's Edge Function secrets settings. Do not put this key in `.env` or
-the Flutter app. Generate a separate random secret of at least 32 characters
-and add it as the `REALID_HMAC_SECRET` Edge Function secret. Keep a secure
-backup and do not rotate it without a planned re-hash process. Remove the
-obsolete `RESEND_API_KEY` and `EMAIL_FROM` secrets from the Supabase Dashboard.
-If the old
-`change-account-email` Edge Function is deployed, delete it from the project's
-Edge Functions dashboard. Migration
-`20261008000003_realid_and_remove_email.sql` removes the email-change table and
-the `Users.email` column, and adds unique HMAC storage for new citizen IDs.
+Supabase injects its server-side secret API key into Edge Functions as
+`SUPABASE_SECRET_KEYS`; the functions read its `default` key automatically.
+Do not add a `SUPABASE_*` secret manually or put a server-side key in `.env` or
+the Flutter app. Remove obsolete `RESEND_API_KEY` and `EMAIL_FROM` secrets
+from the Supabase Dashboard. If the old `change-account-email` Edge Function
+is deployed, delete it from the project's Edge Functions dashboard.
 Confirm the linked project ref matches the host in
 `SUPABASE_URL`. If the function endpoint responds with `404 Not Found`, the
 function has not been deployed to that project (or the project ref is wrong);
@@ -120,11 +135,11 @@ deploy it before retrying registration.
 
 The shared navigation displays role-specific menu items for `Unsign` (not
 signed in), `User`, `Technician`, `Admin`, and `SuperAdmin`. New accounts
-receive their role from the login Edge Function and keep the signed session
-in memory until sign-out, app restart, or its 8-hour expiry. Existing Supabase
-Auth accounts are not supported by the username/password login flow.
+receive the `User` role and an 8-hour signed temporary session. Supabase Auth
+keeps the Google session so the app can issue a new temporary session on a
+later launch.
 
-The account button signs in through the temporary username/password endpoint.
+The account button signs in through Google OAuth.
 At this stage, the role-specific page content is still placeholder UI. Database
 operations protected by Supabase RLS are not available to temporary sessions;
 future data operations need server-side Edge Function endpoints that verify
