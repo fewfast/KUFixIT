@@ -1,11 +1,15 @@
-import 'dart:typed_data';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_map/flutter_map.dart' as flutter_map;
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:latlong2/latlong.dart' as latlong;
+
+import '../auth/temporary_account_session.dart';
+import '../database/connect.dart';
 
 class FixRequestPage extends StatefulWidget {
   const FixRequestPage({super.key});
@@ -15,15 +19,21 @@ class FixRequestPage extends StatefulWidget {
 }
 
 class _FixRequestPageState extends State<FixRequestPage> {
+  static const _maxPhotoBytes = 2 * 1024 * 1024;
   final _formKey = GlobalKey<FormState>();
   final _imagePicker = ImagePicker();
+  final _floorController = TextEditingController();
+  final _roomController = TextEditingController();
   final _otherLocationController = TextEditingController();
+  Key _buildingAutocompleteKey = UniqueKey();
   String? _selectedBuilding;
   LatLng? _selectedCoordinates;
   String? _coordinateError;
+  bool _isSubmitting = false;
   final List<_RepairItem> _repairItems = [_RepairItem()];
 
   static const _otherBuilding = 'อื่นๆ';
+  static const _campusCenter = LatLng(13.1205, 100.9190);
   static const _buildings = [
     'อาคาร 1 บริการวิชาการ',
     'อาคาร 2 ปฏิบัติการวิศวกรรมศาสตร์',
@@ -58,6 +68,8 @@ class _FixRequestPageState extends State<FixRequestPage> {
 
   @override
   void dispose() {
+    _floorController.dispose();
+    _roomController.dispose();
     _otherLocationController.dispose();
     for (final item in _repairItems) {
       item.dispose();
@@ -69,11 +81,19 @@ class _FixRequestPageState extends State<FixRequestPage> {
     try {
       final image = await _imagePicker.pickImage(source: ImageSource.gallery);
       if (image == null || !mounted) return;
+      _imageContentType(image.name);
       final bytes = await image.readAsBytes();
       if (!mounted) return;
+      if (bytes.length > _maxPhotoBytes) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('รูปต้องมีขนาดไม่เกิน 2 MB')),
+        );
+        return;
+      }
       setState(() {
         item.photoName = image.name;
         item.photoBytes = bytes;
+        item.photoError = null;
       });
     } on Exception catch (error) {
       if (!mounted) return;
@@ -95,20 +115,114 @@ class _FixRequestPageState extends State<FixRequestPage> {
     });
   }
 
-  void _submitRequest() {
-    if (!_formKey.currentState!.validate()) return;
+  Future<void> _submitRequest() async {
+    if (_isSubmitting) return;
+    final isFormValid = _formKey.currentState!.validate();
+    setState(() {
+      for (final item in _repairItems) {
+        item.photoError = item.photoBytes == null ? 'กรุณาแนบรูปถ่าย' : null;
+      }
+    });
+    if (!isFormValid || _repairItems.any((item) => item.photoBytes == null)) {
+      return;
+    }
     if (_selectedBuilding == _otherBuilding && _selectedCoordinates == null) {
       setState(() => _coordinateError = 'กรุณาเลือกตำแหน่งบนแผนที่');
       return;
     }
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text(
-          'ตรวจสอบข้อมูลแล้ว แต่ระบบส่งคำร้องและอัปโหลดรูปยังไม่เชื่อมต่อ',
+    final accessToken = TemporaryAccountSession.instance.account?.accessToken;
+    if (accessToken == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('กรุณาเข้าสู่ระบบก่อนส่งคำร้อง')),
+      );
+      return;
+    }
+
+    final selectedBuilding = _selectedBuilding!;
+    final isOtherLocation = selectedBuilding == _otherBuilding;
+    final building = isOtherLocation
+        ? 'other'
+        : RegExp(r'\d+').firstMatch(selectedBuilding)!.group(0)!;
+    final coordinates = isOtherLocation ? _selectedCoordinates! : _campusCenter;
+    final devices = _repairItems
+        .map((item) {
+          final photoBytes = item.photoBytes;
+          final photoName = item.photoName;
+          return {
+            'floor': _optionalText(_floorController.text),
+            'room': _optionalText(_roomController.text),
+            'device': item.equipmentController.text.trim(),
+            'description': _optionalText(item.detailsController.text),
+            'photo': photoBytes == null
+                ? null
+                : {
+                    'contentType': _imageContentType(photoName!),
+                    'base64': base64Encode(photoBytes),
+                  },
+          };
+        })
+        .toList(growable: false);
+
+    setState(() => _isSubmitting = true);
+    try {
+      if (!SupabaseConnection.isInitialized) {
+        throw Exception('ยังไม่ได้เชื่อมต่อ Supabase');
+      }
+      final response = await SupabaseConnection.client.functions.invoke(
+        'create-fix-request',
+        headers: {'Authorization': 'Bearer $accessToken'},
+        body: {
+          'building': building,
+          'area': isOtherLocation ? _otherLocationController.text.trim() : null,
+          'longtitude': coordinates.longitude,
+          'latitude': coordinates.latitude,
+          'devices': devices,
+        },
+      );
+      final result = response.data;
+      if (result is! Map ||
+          result['TicketId'] is! String ||
+          result['PhotoCount'] != _repairItems.length) {
+        throw const FormatException('ไม่ได้รับการยืนยันบันทึกรูปจากระบบ');
+      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'ส่งคำร้องสำเร็จ เลขที่ ${result['TicketId']} '
+            'และบันทึกรูป ${result['PhotoCount']} รูป',
+          ),
         ),
-      ),
-    );
+      );
+      _clearForm();
+    } on Exception catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('ส่งคำร้องไม่สำเร็จ: $error')));
+    } finally {
+      if (mounted) setState(() => _isSubmitting = false);
+    }
+  }
+
+  void _clearForm() {
+    _formKey.currentState?.reset();
+    for (final item in _repairItems) {
+      item.dispose();
+    }
+    _otherLocationController.clear();
+    _floorController.clear();
+    _roomController.clear();
+    setState(() {
+      _repairItems
+        ..clear()
+        ..add(_RepairItem());
+      _buildingAutocompleteKey = UniqueKey();
+      _selectedBuilding = null;
+      _selectedCoordinates = null;
+      _coordinateError = null;
+    });
   }
 
   @override
@@ -132,6 +246,7 @@ class _FixRequestPageState extends State<FixRequestPage> {
               ),
               const SizedBox(height: 24),
               Autocomplete<String>(
+                key: _buildingAutocompleteKey,
                 optionsBuilder: (textEditingValue) {
                   final query = textEditingValue.text.trim().toLowerCase();
                   if (query.isEmpty) return _buildings;
@@ -209,6 +324,26 @@ class _FixRequestPageState extends State<FixRequestPage> {
                     ),
                   ),
               ],
+              const SizedBox(height: 16),
+              TextFormField(
+                controller: _floorController,
+                keyboardType: TextInputType.number,
+                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                decoration: const InputDecoration(
+                  labelText: 'ชั้นที่ (ถ้ามี)',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _roomController,
+                keyboardType: TextInputType.number,
+                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                decoration: const InputDecoration(
+                  labelText: 'เลขห้อง (ถ้ามี)',
+                  border: OutlineInputBorder(),
+                ),
+              ),
               const SizedBox(height: 24),
               Row(
                 children: [
@@ -220,7 +355,7 @@ class _FixRequestPageState extends State<FixRequestPage> {
                   ),
                   IconButton.filledTonal(
                     tooltip: 'เพิ่มรายการ',
-                    onPressed: _addRepairItem,
+                    onPressed: _isSubmitting ? null : _addRepairItem,
                     icon: const Icon(Icons.add),
                   ),
                 ],
@@ -234,9 +369,17 @@ class _FixRequestPageState extends State<FixRequestPage> {
               Align(
                 alignment: Alignment.centerRight,
                 child: FilledButton.icon(
-                  onPressed: _submitRequest,
-                  icon: const Icon(Icons.send_outlined),
-                  label: const Text('ส่งคำร้อง'),
+                  onPressed: _isSubmitting ? null : _submitRequest,
+                  icon: _isSubmitting
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.send_outlined),
+                  label: Text(
+                    _isSubmitting ? 'กำลังส่งคำร้อง...' : 'ส่งคำร้อง',
+                  ),
                 ),
               ),
             ],
@@ -284,22 +427,6 @@ class _FixRequestPageState extends State<FixRequestPage> {
             ),
             const SizedBox(height: 8),
             TextFormField(
-              controller: item.floorController,
-              decoration: const InputDecoration(
-                labelText: 'ชั้นที่ (ถ้ามี)',
-                border: OutlineInputBorder(),
-              ),
-            ),
-            const SizedBox(height: 12),
-            TextFormField(
-              controller: item.roomController,
-              decoration: const InputDecoration(
-                labelText: 'เลขห้อง (ถ้ามี)',
-                border: OutlineInputBorder(),
-              ),
-            ),
-            const SizedBox(height: 12),
-            TextFormField(
               controller: item.equipmentController,
               decoration: const InputDecoration(
                 labelText: 'ชื่ออุปกรณ์ที่พัง',
@@ -315,6 +442,13 @@ class _FixRequestPageState extends State<FixRequestPage> {
                 item.photoName == null ? 'เพิ่มรูปถ่าย' : 'เปลี่ยนรูปถ่าย',
               ),
             ),
+            if (item.photoError case final error?) ...[
+              const SizedBox(height: 4),
+              Text(
+                error,
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
+            ],
             if (item.photoBytes case final bytes?) ...[
               const SizedBox(height: 8),
               ClipRRect(
@@ -333,6 +467,7 @@ class _FixRequestPageState extends State<FixRequestPage> {
                   onPressed: () => setState(() {
                     item.photoName = null;
                     item.photoBytes = null;
+                    item.photoError = 'กรุณาแนบรูปถ่าย';
                   }),
                   icon: const Icon(Icons.delete_outline),
                   label: const Text('ลบรูป'),
@@ -361,6 +496,24 @@ class _FixRequestPageState extends State<FixRequestPage> {
       return 'กรุณากรอกข้อมูล';
     }
     return null;
+  }
+
+  String? _optionalText(String value) {
+    final text = value.trim();
+    return text.isEmpty ? null : text;
+  }
+
+  String _imageContentType(String fileName) {
+    final extension = fileName.split('.').last.toLowerCase();
+    return switch (extension) {
+      'jpg' || 'jpeg' => 'image/jpeg',
+      'png' => 'image/png',
+      'gif' => 'image/gif',
+      'webp' => 'image/webp',
+      _ => throw FormatException(
+        'รองรับรูปภาพ JPG, PNG, GIF หรือ WEBP เท่านั้น',
+      ),
+    };
   }
 }
 
@@ -497,16 +650,13 @@ class _LocationPickerDialogState extends State<_LocationPickerDialog> {
 }
 
 class _RepairItem {
-  final floorController = TextEditingController();
-  final roomController = TextEditingController();
   final equipmentController = TextEditingController();
   final detailsController = TextEditingController();
   String? photoName;
   Uint8List? photoBytes;
+  String? photoError;
 
   void dispose() {
-    floorController.dispose();
-    roomController.dispose();
     equipmentController.dispose();
     detailsController.dispose();
   }

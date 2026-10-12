@@ -12,3 +12,10 @@ verify_jwt = false
 
 [functions.profile-avatar]
 verify_jwt = false
+
+[functions.create-fix-request]
+verify_jwt = false
+
+[db.seed]
+enabled = true
+sql_paths = ["./seed.sql"]
