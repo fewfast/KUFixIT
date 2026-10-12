@@ -11,6 +11,38 @@ import 'package:latlong2/latlong.dart' as latlong;
 import '../auth/temporary_account_session.dart';
 import '../database/connect.dart';
 
+// OpenStreetMap campus centroid: https://www.openstreetmap.org/way/1408248543
+const _campusCenter = LatLng(13.1209646, 100.9192182);
+const _buildingCoordinates = {
+  '1': LatLng(13.120900, 100.919218),
+  '2': LatLng(13.120758, 100.920092),
+  '3': LatLng(13.120429, 100.920714),
+  '4': LatLng(13.120429, 100.920714),
+  '5': LatLng(13.124191, 100.919240),
+  '6': LatLng(13.120879, 100.920656),
+  '7': LatLng(13.117671, 100.921063),
+  '9': LatLng(13.117905, 100.920758),
+  '10': LatLng(13.118544, 100.920377),
+  '11': LatLng(13.124965, 100.919261),
+  '12': LatLng(13.121722, 100.920111),
+  '13': LatLng(13.123324, 100.918349),
+  '14': LatLng(13.121924, 100.919250),
+  '15': LatLng(13.120015, 100.919926),
+  '16': LatLng(13.115229, 100.923787),
+  '17': LatLng(13.119170, 100.919825),
+  '18': LatLng(13.124756, 100.919749),
+  '19': LatLng(13.117848, 100.921621),
+  '20': LatLng(13.122828, 100.918167),
+  '21': LatLng(13.124735, 100.918784),
+  '22': LatLng(13.122748, 100.919202),
+  '23': LatLng(13.119765, 100.920800),
+  '24': LatLng(13.119295, 100.921053),
+  '25': LatLng(13.118747, 100.921069),
+  '26': LatLng(13.118784, 100.921412),
+  '27': LatLng(13.118849, 100.920605),
+  '28': LatLng(13.119372, 100.920327),
+};
+
 class FixRequestPage extends StatefulWidget {
   const FixRequestPage({super.key});
 
@@ -33,7 +65,6 @@ class _FixRequestPageState extends State<FixRequestPage> {
   final List<_RepairItem> _repairItems = [_RepairItem()];
 
   static const _otherBuilding = 'อื่นๆ';
-  static const _campusCenter = LatLng(13.1205, 100.9190);
   static const _buildings = [
     'อาคาร 1 บริการวิชาการ',
     'อาคาร 2 ปฏิบัติการวิศวกรรมศาสตร์',
@@ -62,7 +93,6 @@ class _FixRequestPageState extends State<FixRequestPage> {
     'อาคาร 26 อาคารคณะวิทยาศาสตร์ ศรีราชา',
     'อาคาร 27 อาคารเรียนและปฏิบัติการพื้นฐานและเทคโนโลยี',
     'อาคาร 28 อาคารอเนกประสงค์และการประชุม',
-    'อาคาร 29 อาคารปฏิบัติการไฟฟ้าแรงสูง',
     _otherBuilding,
   ];
 
@@ -126,7 +156,7 @@ class _FixRequestPageState extends State<FixRequestPage> {
     if (!isFormValid || _repairItems.any((item) => item.photoBytes == null)) {
       return;
     }
-    if (_selectedBuilding == _otherBuilding && _selectedCoordinates == null) {
+    if (_selectedCoordinates == null) {
       setState(() => _coordinateError = 'กรุณาเลือกตำแหน่งบนแผนที่');
       return;
     }
@@ -144,7 +174,7 @@ class _FixRequestPageState extends State<FixRequestPage> {
     final building = isOtherLocation
         ? 'other'
         : RegExp(r'\d+').firstMatch(selectedBuilding)!.group(0)!;
-    final coordinates = isOtherLocation ? _selectedCoordinates! : _campusCenter;
+    final coordinates = _selectedCoordinates!;
     final devices = _repairItems
         .map((item) {
           final photoBytes = item.photoBytes;
@@ -257,9 +287,13 @@ class _FixRequestPageState extends State<FixRequestPage> {
                 onSelected: (building) {
                   setState(() {
                     _selectedBuilding = building;
+                    final buildingNumber =
+                        RegExp(r'\d+').firstMatch(building)?.group(0);
+                    _selectedCoordinates = building == _otherBuilding
+                        ? null
+                        : _buildingCoordinates[buildingNumber];
+                    _coordinateError = null;
                     if (building != _otherBuilding) {
-                      _selectedCoordinates = null;
-                      _coordinateError = null;
                       _otherLocationController.clear();
                     }
                   });
@@ -291,6 +325,17 @@ class _FixRequestPageState extends State<FixRequestPage> {
                       );
                     },
               ),
+              if (_selectedBuilding != null &&
+                  _selectedBuilding != _otherBuilding)
+                if (_selectedCoordinates case final coordinates?)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Text(
+                      'Latitude: ${coordinates.latitude.toStringAsFixed(6)}  '
+                      'Longitude: ${coordinates.longitude.toStringAsFixed(6)}',
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
               if (_selectedBuilding == _otherBuilding) ...[
                 const SizedBox(height: 16),
                 TextFormField(
@@ -527,7 +572,6 @@ class _LocationPickerDialog extends StatefulWidget {
 }
 
 class _LocationPickerDialogState extends State<_LocationPickerDialog> {
-  static const _campusCenter = LatLng(13.1205, 100.9190);
   LatLng? _selectedPosition;
 
   @override
