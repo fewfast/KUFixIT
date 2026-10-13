@@ -38,12 +38,23 @@ void main() {
       const MaterialApp(home: Layout(roleOverride: 'User')),
     );
 
+    expect(find.text('ค้นหา TicketId'), findsOneWidget);
+    expect(find.text('ยังไม่ได้เชื่อมต่อ Supabase'), findsOneWidget);
+
     await tester.tap(find.byTooltip('เปิดเมนู'));
     await tester.pumpAndSettle();
 
     expect(find.text('แจ้งซ่อม'), findsOneWidget);
     expect(find.text('รายการแจ้งซ่อมของฉัน'), findsOneWidget);
     expect(find.text('จัดการผู้ใช้'), findsNothing);
+    final menuLabels = tester
+        .widgetList<ListTile>(find.byType(ListTile))
+        .map((tile) => (tile.title! as Text).data)
+        .toList();
+    expect(
+      menuLabels.indexOf('รายการแจ้งซ่อมของฉัน'),
+      lessThan(menuLabels.indexOf('แจ้งซ่อม')),
+    );
   });
 
   testWidgets('User can open the repair request form', (tester) async {
@@ -135,16 +146,14 @@ void main() {
       const MaterialApp(home: Layout(roleOverride: 'Unsign')),
     );
 
-    expect(
-      find.text('สถานะงานซ่อมจะแสดงที่นี่เมื่อเชื่อมต่อข้อมูลแล้ว'),
-      findsOneWidget,
-    );
+    expect(find.text('ค้นหา TicketId'), findsOneWidget);
+    expect(find.text('ยังไม่ได้เชื่อมต่อ Supabase'), findsOneWidget);
     await tester.tap(find.byTooltip('เปิดเมนู'));
     await tester.pumpAndSettle();
 
     expect(find.textContaining('UID:'), findsNothing);
-    expect(find.text('ติดตามงานซ่อม'), findsNWidgets(2));
-    expect(find.text('หน้าหลัก'), findsNothing);
+    expect(find.text('ติดตามงานซ่อม'), findsOneWidget);
+    expect(find.text('หน้าหลัก'), findsOneWidget);
     expect(find.text('แจ้งซ่อม'), findsNothing);
   });
 
@@ -267,7 +276,7 @@ void main() {
 
     await tester.tap(find.byTooltip('เปิดเมนู'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('ติดตามงานซ่อม').last);
+    await tester.tap(find.text('หน้าหลัก'));
 
     await tester.pump(const Duration(milliseconds: 100));
     await tester.tap(find.byTooltip('เปิดเมนู'), warnIfMissed: false);
@@ -275,10 +284,7 @@ void main() {
 
     expect(find.byType(Layout), findsOneWidget);
     expect(find.byType(Scaffold), findsOneWidget);
-    expect(
-      find.text('สถานะงานซ่อมจะแสดงที่นี่เมื่อเชื่อมต่อข้อมูลแล้ว'),
-      findsOneWidget,
-    );
+    expect(find.text('ค้นหา TicketId'), findsOneWidget);
   });
 
   testWidgets('database connection error page retries on button press', (

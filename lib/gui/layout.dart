@@ -10,7 +10,7 @@ import '../database/connect.dart';
 import 'fixRequest.dart';
 import 'personal_info_page.dart';
 import 'superRegister.dart';
-import 'tickerMonitor.dart';
+import 'ticketMonitor.dart';
 
 class Layout extends StatefulWidget {
   const Layout({super.key, this.roleOverride});
@@ -184,8 +184,9 @@ class _LayoutState extends State<Layout> {
         index: currentIndex,
         children: [
           for (final page in pages)
-            if (page.id == 'ticket_monitor')
-              const TickerMonitor()
+            if (page.id == 'ticket_monitor' ||
+                (role == 'User' && page.id == 'dashboard'))
+              const TicketMonitor()
             else if (page.id == 'new_request')
               const FixRequestPage()
             else
@@ -503,7 +504,7 @@ List<_PageInfo> _pagesFor(String role) {
     'Unsign' => [
       const _PageInfo(
         'ticket_monitor',
-        'ติดตามงานซ่อม',
+        'หน้าหลัก',
         Icons.monitor_heart_outlined,
         'ติดตามสถานะงานซ่อม',
       ),
@@ -511,16 +512,16 @@ List<_PageInfo> _pagesFor(String role) {
     _ => [
       dashboard,
       const _PageInfo(
-        'new_request',
-        'แจ้งซ่อม',
-        Icons.add_circle_outline,
-        'สร้างคำร้องแจ้งซ่อมใหม่',
-      ),
-      const _PageInfo(
         'my_requests',
         'รายการแจ้งซ่อมของฉัน',
         Icons.receipt_long_outlined,
         'ติดตามสถานะคำร้องแจ้งซ่อมของคุณ',
+      ),
+      const _PageInfo(
+        'new_request',
+        'แจ้งซ่อม',
+        Icons.add_circle_outline,
+        'สร้างคำร้องแจ้งซ่อมใหม่',
       ),
     ],
   };

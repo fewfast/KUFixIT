@@ -16,6 +16,9 @@ verify_jwt = false
 [functions.create-fix-request]
 verify_jwt = false
 
+[functions.list-public-tickets]
+verify_jwt = false
+
 [db.seed]
 enabled = true
 sql_paths = ["./seed.sql"]

@@ -148,7 +148,17 @@ operations need server-side Edge Function endpoints that verify the signed
 temporary session and authorize each role.
 The centered
 `KUFixIT` text in the app bar is a placeholder for the web logo. The public
-ticket monitor page is in `lib/gui/tickerMonitor.dart`.
+ticket monitor page is in `lib/gui/ticketMonitor.dart`; it searches and pages
+through ticket IDs using the `list-public-tickets` Edge Function, which returns
+the ticket ID, building, area, floor, room, status, and the ticket's shared
+request date. Expanding a ticket loads its equipment details from the child
+table named for that ticket ID. `request_date` records when the repair request
+was submitted; the child table's `next_fix_date` remains a `timestamptz[]`.
+The ticket list displays the latest value from that schedule array. Null repair
+dates display as not scheduled; null floor and room values display as
+unspecified. Migrations `20261013000002_ticket_next_fix_date_scalar.sql` and
+`20261013000003_request_date_and_next_fix_date_array.sql` preserve existing
+schedule values while converting the array to a scalar and back.
 
 Access the initialized client with `SupabaseConnection.client`, for example:
 
