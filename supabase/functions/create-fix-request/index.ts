@@ -101,12 +101,16 @@ function parseDevices(value: unknown): DeviceParseResult {
     if (
       (rawDevice.floor != null &&
         (typeof rawDevice.floor !== "string" ||
-          !/^\d+$/.test(rawDevice.floor))) ||
+          !/^\d+$/.test(rawDevice.floor) ||
+          Number(rawDevice.floor) > 50)) ||
       (rawDevice.room != null &&
         (typeof rawDevice.room !== "string" ||
-          !/^\d+$/.test(rawDevice.room)))
+          !/^[a-zA-Z0-9-]{1,8}$/.test(rawDevice.room)))
     ) {
-      return { devices: null, error: "Floor and room must contain digits only." };
+      return {
+        devices: null,
+        error: "Floor must be 50 or less and room must be up to 8 letters, digits, or hyphens.",
+      };
     }
 
     const photoData = rawDevice.photo;

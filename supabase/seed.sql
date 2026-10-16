@@ -39,9 +39,7 @@ begin
       device text not null,
       discription text,
       status text not null default %L,
-      fix_history_time timestamptz[] default null,
-      fix_history_progress text[] default null,
-      technician_history text[] default null,
+      fix_history_progress boolean[] default null,
       technician_comment text[] default null,
       next_fix_date timestamptz[] default null
     )',

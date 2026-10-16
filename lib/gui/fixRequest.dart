@@ -287,8 +287,9 @@ class _FixRequestPageState extends State<FixRequestPage> {
                 onSelected: (building) {
                   setState(() {
                     _selectedBuilding = building;
-                    final buildingNumber =
-                        RegExp(r'\d+').firstMatch(building)?.group(0);
+                    final buildingNumber = RegExp(
+                      r'\d+',
+                    ).firstMatch(building)?.group(0);
                     _selectedCoordinates = building == _otherBuilding
                         ? null
                         : _buildingCoordinates[buildingNumber];
@@ -373,21 +374,46 @@ class _FixRequestPageState extends State<FixRequestPage> {
               TextFormField(
                 controller: _floorController,
                 keyboardType: TextInputType.number,
-                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                inputFormatters: [
+                  FilteringTextInputFormatter.digitsOnly,
+                  TextInputFormatter.withFunction((oldValue, newValue) {
+                    if (newValue.text.isEmpty) return newValue;
+                    final floor = int.tryParse(newValue.text);
+                    return floor != null && floor <= 50 ? newValue : oldValue;
+                  }),
+                ],
                 decoration: const InputDecoration(
-                  labelText: 'ชั้นที่ (ถ้ามี)',
+                  labelText: 'ชั้นที่ (ถ้ามี, ไม่เกิน 50 ชั้น)',
                   border: OutlineInputBorder(),
                 ),
+                validator: (value) {
+                  final floor = value?.trim() ?? '';
+                  if (floor.isEmpty) return null;
+                  final parsedFloor = int.tryParse(floor);
+                  return parsedFloor != null && parsedFloor <= 50
+                      ? null
+                      : 'ชั้นต้องไม่เกิน 50';
+                },
               ),
               const SizedBox(height: 12),
               TextFormField(
                 controller: _roomController,
-                keyboardType: TextInputType.number,
-                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                keyboardType: TextInputType.text,
+                inputFormatters: [
+                  FilteringTextInputFormatter.allow(RegExp('[a-zA-Z0-9-]')),
+                  LengthLimitingTextInputFormatter(8),
+                ],
                 decoration: const InputDecoration(
                   labelText: 'เลขห้อง (ถ้ามี)',
                   border: OutlineInputBorder(),
                 ),
+                validator: (value) {
+                  final room = value?.trim() ?? '';
+                  return room.isEmpty ||
+                          RegExp(r'^[a-zA-Z0-9-]{1,8}$').hasMatch(room)
+                      ? null
+                      : 'เลขห้องต้องเป็นตัวอักษร ตัวเลข หรือ - ไม่เกิน 8 ตัว';
+                },
               ),
               const SizedBox(height: 24),
               Row(

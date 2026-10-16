@@ -57,6 +57,63 @@ void main() {
     );
   });
 
+  testWidgets('Admin dashboard shows the repair monitor with admin access', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      const MaterialApp(home: Layout(roleOverride: 'Admin')),
+    );
+
+    expect(find.text('ติดตามงานซ่อม'), findsOneWidget);
+    expect(find.text('ค้นหา TicketId'), findsOneWidget);
+    expect(find.text('กรุณาเข้าสู่ระบบด้วยบัญชีผู้ดูแลระบบ'), findsOneWidget);
+  });
+
+  testWidgets('Admin can open technician management between users and reports', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      const MaterialApp(home: Layout(roleOverride: 'Admin')),
+    );
+
+    await tester.tap(find.byTooltip('เปิดเมนู'));
+    await tester.pumpAndSettle();
+
+    final menuLabels = tester
+        .widgetList<ListTile>(find.byType(ListTile))
+        .map((tile) => (tile.title! as Text).data)
+        .toList();
+    expect(
+      menuLabels.indexOf('จัดการช่างเทคนิค'),
+      menuLabels.indexOf('จัดการผู้ใช้') + 1,
+    );
+    expect(
+      menuLabels.indexOf('จัดการช่างเทคนิค'),
+      lessThan(menuLabels.indexOf('รายงาน')),
+    );
+
+    await tester.tap(find.text('จัดการช่างเทคนิค'));
+    await tester.pumpAndSettle();
+    expect(find.text('จัดการบัญชีและข้อมูลช่างเทคนิค'), findsOneWidget);
+  });
+
+  testWidgets('User can open their own repair request list', (tester) async {
+    await tester.pumpWidget(
+      const MaterialApp(home: Layout(roleOverride: 'User')),
+    );
+
+    await tester.tap(find.byTooltip('เปิดเมนู'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('รายการแจ้งซ่อมของฉัน'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('รายการแจ้งซ่อมของฉัน'), findsOneWidget);
+    expect(
+      find.text('กรุณาเข้าสู่ระบบเพื่อดูรายการแจ้งซ่อมของคุณ'),
+      findsOneWidget,
+    );
+  });
+
   testWidgets('User can open the repair request form', (tester) async {
     await tester.pumpWidget(
       const MaterialApp(home: Layout(roleOverride: 'User')),
@@ -72,7 +129,7 @@ void main() {
       findsOneWidget,
     );
     expect(find.text('อาคาร'), findsOneWidget);
-    expect(find.text('ชั้นที่ (ถ้ามี)'), findsOneWidget);
+    expect(find.text('ชั้นที่ (ถ้ามี, ไม่เกิน 50 ชั้น)'), findsOneWidget);
     expect(find.text('เลขห้อง (ถ้ามี)'), findsOneWidget);
     expect(find.text('ชื่ออุปกรณ์ที่พัง'), findsOneWidget);
     expect(find.text('เพิ่มรูปถ่าย'), findsOneWidget);
@@ -101,7 +158,7 @@ void main() {
     expect(find.text('ยังไม่ได้เลือกพิกัด'), findsOneWidget);
     await tester.tap(find.byTooltip('เพิ่มรายการ'));
     await tester.pumpAndSettle();
-    expect(find.text('ชั้นที่ (ถ้ามี)'), findsOneWidget);
+    expect(find.text('ชั้นที่ (ถ้ามี, ไม่เกิน 50 ชั้น)'), findsOneWidget);
     expect(find.text('เลขห้อง (ถ้ามี)'), findsOneWidget);
     await tester.drag(find.byType(ListView).first, const Offset(0, -900));
     await tester.pumpAndSettle();

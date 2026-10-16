@@ -108,16 +108,36 @@ tokens must verify their signature and enforce permissions on the server.
 Client-side role state alone is not authorization, and Supabase RLS does not
 recognize this custom session as a Supabase Auth session.
 
-To deploy to the same Supabase project configured in `.env`, install the
-Supabase CLI, authenticate with `supabase login`, and run:
+The Supabase CLI is not a Flutter dependency. Run it through `npx` (Node.js
+and npm are required). Authenticate once, then link this checkout to the project
+whose URL is configured in `.env`:
 
 ```sh
-supabase link --project-ref <project-ref>
-supabase db push
-supabase functions deploy register-user
-supabase functions deploy login-user
-supabase functions deploy update-user-profile
-supabase functions deploy profile-avatar
+npx --yes supabase --version
+npx --yes supabase login
+npx --yes supabase link --project-ref <project-ref>
+npx --yes supabase migration list --linked
+```
+
+Use the project ref from the hostname in `SUPABASE_URL` (the part before
+`.supabase.co`). The CLI stores the link in local Supabase metadata; do not
+commit access tokens or database passwords. `migration list --linked` compares
+the local migration files with the linked database without applying changes.
+Review pending migrations before running `npx --yes supabase db push`. The local
+Supabase stack (`npx --yes supabase start` or `status`) additionally requires
+Docker Desktop or Podman; linking and managing a hosted project do not require
+the local stack.
+
+To deploy Edge Functions after reviewing the changes, run:
+
+```sh
+npx --yes supabase functions deploy register-user
+npx --yes supabase functions deploy login-user
+npx --yes supabase functions deploy staff-login
+npx --yes supabase functions deploy update-user-profile
+npx --yes supabase functions deploy profile-avatar
+npx --yes supabase functions deploy create-fix-request
+npx --yes supabase functions deploy list-public-tickets
 ```
 
 Supabase injects its server-side secret API key into Edge Functions as

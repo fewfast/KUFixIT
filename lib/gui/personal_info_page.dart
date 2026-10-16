@@ -349,8 +349,9 @@ class _PersonalInfoPageState extends State<PersonalInfoPage> {
       }
       if (mounted) setState(() => _avatarUrl = url);
     } on Exception catch (error) {
-      if (mounted)
+      if (mounted) {
         setState(() => _avatarErrorMessage = _errorFromResponse(error));
+      }
     } finally {
       if (mounted) setState(() => _isUploadingAvatar = false);
     }
@@ -372,7 +373,7 @@ class _PersonalInfoPageState extends State<PersonalInfoPage> {
       'Authorization': 'Bearer $accessToken',
       'apikey': SupabaseConnection.anonKey,
       'x-avatar-action': action,
-      if (contentType != null) 'Content-Type': contentType,
+      'Content-Type': ?contentType,
       if (body == null) 'Content-Type': 'application/json',
     };
     final response = await http
@@ -454,9 +455,7 @@ class _PersonalInfoPageState extends State<PersonalInfoPage> {
         headers: {'Authorization': 'Bearer ${account.accessToken}'},
         body: {'displayName': displayName},
       );
-      TemporaryAccountSession.instance.updateProfile(
-        displayName: displayName,
-      );
+      TemporaryAccountSession.instance.updateProfile(displayName: displayName);
 
       if (mounted) {
         setState(() {

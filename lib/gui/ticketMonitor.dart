@@ -2,10 +2,18 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../auth/temporary_account_session.dart';
 import '../database/connect.dart';
 
 class TicketMonitor extends StatefulWidget {
-  const TicketMonitor({super.key});
+  const TicketMonitor({
+    super.key,
+    this.myRequests = false,
+    this.adminMode = false,
+  });
+
+  final bool myRequests;
+  final bool adminMode;
 
   @override
   State<TicketMonitor> createState() => _TicketMonitorState();
@@ -14,11 +22,21 @@ class TicketMonitor extends StatefulWidget {
 class _TicketMonitorState extends State<TicketMonitor> {
   static const _pageSize = 10;
   final _searchController = TextEditingController();
+  final _ticketsScrollController = ScrollController();
   Timer? _searchTimer;
   List<_Ticket> _tickets = const [];
   int _page = 0;
   int _total = 0;
   int _requestVersion = 0;
+  String _sortColumn = 'status';
+  bool _sortAscending = true;
+  static const _statusOrder = {
+    'pending': 0,
+    'validating': 1,
+    'finish': 2,
+    'rejected': 3,
+    'cancel': 4,
+  };
   bool _isLoading = true;
   String? _errorMessage;
 
@@ -32,6 +50,7 @@ class _TicketMonitorState extends State<TicketMonitor> {
   void dispose() {
     _searchTimer?.cancel();
     _searchController.dispose();
+    _ticketsScrollController.dispose();
     super.dispose();
   }
 
@@ -47,9 +66,89 @@ class _TicketMonitorState extends State<TicketMonitor> {
     _searchTimer = Timer(const Duration(milliseconds: 350), _loadTickets);
   }
 
+  void _sortBy(String column) {
+    setState(() {
+      if (_sortColumn != column) {
+        _sortColumn = column;
+        _sortAscending = true;
+      } else if (_sortAscending) {
+        _sortAscending = !_sortAscending;
+      } else {
+        _sortColumn = 'status';
+        _sortAscending = true;
+      }
+      _page = 0;
+      _tickets = _sortTickets(_tickets);
+    });
+    _loadTickets();
+  }
+
+  List<_Ticket> _sortTickets(List<_Ticket> tickets) {
+    final sorted = [...tickets];
+    final originalOrder = {
+      for (var index = 0; index < tickets.length; index++)
+        tickets[index].ticketId: index,
+    };
+    sorted.sort((first, second) {
+      final firstValue = _ticketSortValue(first, _sortColumn);
+      final secondValue = _ticketSortValue(second, _sortColumn);
+      int result;
+      if (firstValue == null || secondValue == null) {
+        if (firstValue == null && secondValue != null) return 1;
+        if (firstValue != null && secondValue == null) return -1;
+        result = 0;
+      } else if (firstValue is DateTime && secondValue is DateTime) {
+        result = firstValue.compareTo(secondValue);
+      } else if (firstValue is DateTime && secondValue is String) {
+        result = firstValue.compareTo(DateTime.parse(secondValue));
+      } else if (firstValue is String && secondValue is DateTime) {
+        result = DateTime.parse(firstValue).compareTo(secondValue);
+      } else if (firstValue is int && secondValue is int) {
+        result = firstValue.compareTo(secondValue);
+      } else {
+        result = firstValue.toString().toLowerCase().compareTo(
+          secondValue.toString().toLowerCase(),
+        );
+      }
+      if (result == 0) {
+        return originalOrder[first.ticketId]!.compareTo(
+          originalOrder[second.ticketId]!,
+        );
+      }
+      return _sortAscending ? result : -result;
+    });
+    return sorted;
+  }
+
+  Object? _ticketSortValue(_Ticket ticket, String column) {
+    return switch (column) {
+      'TicketId' => ticket.ticketId,
+      'request_date' => ticket.requestDate,
+      'building' => ticket.building,
+      'area' => ticket.area,
+      'floor' => ticket.floor,
+      'room' => ticket.room,
+      'next_fix_date' => ticket.nextFixDate,
+      'status' => _statusOrder[ticket.status] ?? 99,
+      _ => null,
+    };
+  }
+
   Future<void> _loadTickets() async {
     _searchTimer?.cancel();
     final requestVersion = ++_requestVersion;
+    final account = TemporaryAccountSession.instance.account;
+    if ((widget.myRequests || widget.adminMode) && account == null) {
+      setState(() {
+        _tickets = const [];
+        _total = 0;
+        _isLoading = false;
+        _errorMessage = widget.adminMode
+            ? 'กรุณาเข้าสู่ระบบด้วยบัญชีผู้ดูแลระบบ'
+            : 'กรุณาเข้าสู่ระบบเพื่อดูรายการแจ้งซ่อมของคุณ';
+      });
+      return;
+    }
     if (!SupabaseConnection.isInitialized) {
       setState(() {
         _tickets = const [];
@@ -68,7 +167,18 @@ class _TicketMonitorState extends State<TicketMonitor> {
     try {
       final response = await SupabaseConnection.client.functions.invoke(
         'list-public-tickets',
-        body: {'ticketId': ticketId, 'page': _page, 'pageSize': _pageSize},
+        headers: widget.myRequests || widget.adminMode
+            ? {'Authorization': 'Bearer ${account!.accessToken}'}
+            : null,
+        body: {
+          if (widget.myRequests) 'action': 'my-tickets',
+          if (widget.adminMode) 'action': 'admin-tickets',
+          'ticketId': ticketId,
+          'page': _page,
+          'pageSize': _pageSize,
+          'sortBy': _sortColumn,
+          'sortAscending': _sortAscending,
+        },
       );
       final data = response.data;
       if (data is! Map || data['tickets'] is! List || data['total'] is! int) {
@@ -79,7 +189,7 @@ class _TicketMonitorState extends State<TicketMonitor> {
           .toList(growable: false);
       if (!mounted || requestVersion != _requestVersion) return;
       setState(() {
-        _tickets = tickets;
+        _tickets = _sortTickets(tickets);
         _total = data['total'] as int;
         _isLoading = false;
       });
@@ -104,7 +214,7 @@ class _TicketMonitorState extends State<TicketMonitor> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Text(
-            'ติดตามงานซ่อม',
+            widget.myRequests ? 'รายการแจ้งซ่อมของฉัน' : 'ติดตามงานซ่อม',
             style: Theme.of(context).textTheme.headlineSmall,
             textAlign: TextAlign.center,
           ),
@@ -204,7 +314,7 @@ class _TicketMonitorState extends State<TicketMonitor> {
   }
 
   Widget _buildTable(BuildContext context) {
-    if (_isLoading) {
+    if (_isLoading && _tickets.isEmpty) {
       return const Center(child: CircularProgressIndicator());
     }
     if (_errorMessage case final error?) {
@@ -229,12 +339,14 @@ class _TicketMonitorState extends State<TicketMonitor> {
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        final tableWidth = constraints.maxWidth < 720
-            ? 720.0
+        final tableWidth = constraints.maxWidth < 900
+            ? 900.0
             : constraints.maxWidth;
         final colors = Theme.of(context).colorScheme;
         final borderColor = colors.outlineVariant.withValues(alpha: 0.55);
-        final columnWidth = tableWidth / 7;
+        final columnWidth = tableWidth / 8.7;
+        final scheduleColumnWidth = columnWidth * 1.2;
+        final statusColumnWidth = columnWidth * 1.5;
         final headingStyle = Theme.of(context).textTheme.labelLarge?.copyWith(
           color: colors.onPrimaryContainer,
           fontWeight: FontWeight.w700,
@@ -242,72 +354,112 @@ class _TicketMonitorState extends State<TicketMonitor> {
         final cellStyle = Theme.of(context).textTheme.bodyMedium;
 
         return SingleChildScrollView(
-          child: SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Container(
-              width: tableWidth,
-              decoration: BoxDecoration(
-                border: Border.all(color: borderColor),
-                borderRadius: BorderRadius.circular(12),
-                color: colors.surface,
-                boxShadow: [
-                  BoxShadow(
-                    color: colors.shadow.withValues(alpha: 0.05),
-                    blurRadius: 12,
-                    offset: const Offset(0, 4),
+          scrollDirection: Axis.horizontal,
+          child: Container(
+            width: tableWidth,
+            height: constraints.maxHeight,
+            decoration: BoxDecoration(
+              border: Border.all(color: borderColor),
+              borderRadius: BorderRadius.circular(12),
+              color: colors.surface,
+              boxShadow: [
+                BoxShadow(
+                  color: colors.shadow.withValues(alpha: 0.05),
+                  blurRadius: 12,
+                  offset: const Offset(0, 4),
+                ),
+              ],
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: Column(
+              children: [
+                Table(
+                  columnWidths: {
+                    for (var index = 0; index < 6; index++)
+                      index: FixedColumnWidth(columnWidth),
+                    6: FixedColumnWidth(scheduleColumnWidth),
+                    7: FixedColumnWidth(statusColumnWidth),
+                  },
+                  defaultVerticalAlignment: TableCellVerticalAlignment.middle,
+                  border: TableBorder(
+                    verticalInside: BorderSide(color: borderColor, width: 0.7),
+                    bottom: BorderSide(color: borderColor, width: 0.7),
                   ),
-                ],
-              ),
-              clipBehavior: Clip.antiAlias,
-              child: Column(
-                children: [
-                  Table(
-                    columnWidths: {
-                      for (var index = 0; index < 7; index++)
-                        index: FixedColumnWidth(columnWidth),
-                    },
-                    defaultVerticalAlignment: TableCellVerticalAlignment.middle,
-                    border: TableBorder(
-                      verticalInside: BorderSide(
-                        color: borderColor,
-                        width: 0.7,
-                      ),
-                      bottom: BorderSide(color: borderColor, width: 0.7),
+                  children: [
+                    TableRow(
+                      decoration: BoxDecoration(color: colors.primaryContainer),
+                      children: [
+                        _sortableHeader(
+                          'TicketId',
+                          'TicketId',
+                          backgroundColor: Colors.transparent,
+                          textStyle: headingStyle,
+                        ),
+                        _sortableHeader(
+                          'request_date',
+                          'วันที่แจ้ง',
+                          backgroundColor: Colors.transparent,
+                          textStyle: headingStyle,
+                        ),
+                        for (final label in const [
+                          'อาคาร',
+                          'บริเวณ',
+                          'ชั้นที่',
+                          'เลขห้อง',
+                        ])
+                          _tableCell(
+                            label,
+                            backgroundColor: Colors.transparent,
+                            textStyle: headingStyle,
+                          ),
+                        _sortableHeader(
+                          'next_fix_date',
+                          'ช่วงเวลาที่เข้าซ่อมครั้งถัดไป',
+                          backgroundColor: Colors.transparent,
+                          textStyle: headingStyle,
+                        ),
+                        _tableCell(
+                          'สถานะ',
+                          backgroundColor: Colors.transparent,
+                          textStyle: headingStyle,
+                        ),
+                      ],
                     ),
-                    children: [
-                      TableRow(
-                        children: [
-                          for (final label in const [
-                            'TicketId',
-                            'อาคาร',
-                            'บริเวณ',
-                            'ชั้นที่',
-                            'เลขห้อง',
-                            'วันเข้าซ่อม',
-                            'สถานะ',
-                          ])
-                            _tableCell(
-                              label,
-                              backgroundColor: colors.primaryContainer
-                                  .withValues(alpha: 0.55),
-                              textStyle: headingStyle,
+                  ],
+                ),
+                Expanded(
+                  child: ScrollbarTheme(
+                    data: const ScrollbarThemeData(
+                      crossAxisMargin: 0,
+                      mainAxisMargin: 0,
+                    ),
+                    child: Scrollbar(
+                      controller: _ticketsScrollController,
+                      scrollbarOrientation: ScrollbarOrientation.right,
+                      child: CustomScrollView(
+                        controller: _ticketsScrollController,
+                        slivers: [
+                          for (var index = 0; index < _tickets.length; index++)
+                            _ExpandableTicketRow(
+                              key: ValueKey(_tickets[index].ticketId),
+                              ticket: _tickets[index],
+                              myRequests: widget.myRequests,
+                              adminMode: widget.adminMode,
+                              onTicketCancelled: _loadTickets,
+                              index: index,
+                              columnWidth: columnWidth,
+                              scheduleColumnWidth: scheduleColumnWidth,
+                              statusColumnWidth: statusColumnWidth,
+                              borderColor: borderColor,
+                              textStyle: cellStyle,
+                              tableCell: _tableCell,
                             ),
                         ],
                       ),
-                    ],
-                  ),
-                  for (var index = 0; index < _tickets.length; index++)
-                    _ExpandableTicketRow(
-                      key: ValueKey(_tickets[index].ticketId),
-                      ticket: _tickets[index],
-                      index: index,
-                      columnWidth: columnWidth,
-                      borderColor: borderColor,
-                      textStyle: cellStyle,
-                      tableCell: _tableCell,
                     ),
-                ],
-              ),
+                  ),
+                ),
+              ],
             ),
           ),
         );
@@ -336,22 +488,70 @@ class _TicketMonitorState extends State<TicketMonitor> {
           ),
     );
   }
+
+  Widget _sortableHeader(
+    String column,
+    String label, {
+    required Color backgroundColor,
+    TextStyle? textStyle,
+  }) {
+    final isSorted = _sortColumn == column;
+    return _tableCell(
+      '',
+      backgroundColor: backgroundColor,
+      child: InkWell(
+        onTap: () => _sortBy(column),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Flexible(
+              child: Text(
+                label,
+                textAlign: TextAlign.center,
+                style: textStyle,
+                softWrap: true,
+              ),
+            ),
+            const SizedBox(width: 2),
+            Icon(
+              isSorted
+                  ? _sortAscending
+                        ? Icons.arrow_upward
+                        : Icons.arrow_downward
+                  : Icons.unfold_more,
+              size: 16,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 class _ExpandableTicketRow extends StatefulWidget {
   const _ExpandableTicketRow({
     super.key,
     required this.ticket,
+    required this.myRequests,
+    required this.adminMode,
+    required this.onTicketCancelled,
     required this.index,
     required this.columnWidth,
+    required this.scheduleColumnWidth,
+    required this.statusColumnWidth,
     required this.borderColor,
     required this.textStyle,
     required this.tableCell,
   });
 
   final _Ticket ticket;
+  final bool myRequests;
+  final bool adminMode;
+  final VoidCallback onTicketCancelled;
   final int index;
   final double columnWidth;
+  final double scheduleColumnWidth;
+  final double statusColumnWidth;
   final Color borderColor;
   final TextStyle? textStyle;
   final Widget Function(
@@ -370,8 +570,55 @@ class _ExpandableTicketRowState extends State<_ExpandableTicketRow> {
   bool _isExpanded = false;
   bool _isLoading = false;
   bool _hasLoaded = false;
+  bool _showRepairHistory = false;
   String? _errorMessage;
   List<_TicketDevice> _devices = const [];
+  List<String?> _technicians = const [];
+  List<DateTime?> _repairTimes = const [];
+  List<DateTime?> _repairEndTimes = const [];
+
+  List<_RepairHistoryRow> get _repairHistory {
+    final historyByIndex = <int, List<_RepairHistoryEntry>>{};
+    for (final device in _devices) {
+      for (final entry in device.repairHistory) {
+        historyByIndex.putIfAbsent(entry.index, () => []).add(entry);
+      }
+    }
+
+    final historyLength = historyByIndex.keys.fold<int>(
+      [
+        _repairTimes.length,
+        _repairEndTimes.length,
+        _technicians.length,
+      ].reduce((first, second) => first > second ? first : second),
+      (length, index) => index + 1 > length ? index + 1 : length,
+    );
+    final rows = List.generate(historyLength, (index) {
+      final entries = historyByIndex[index] ?? const <_RepairHistoryEntry>[];
+      final repairedDevices = entries
+          .where((entry) => entry.progress == true)
+          .map((entry) => entry.deviceName)
+          .toSet()
+          .join(', ');
+      return _RepairHistoryRow(
+        index: index,
+        startTime: index < _repairTimes.length ? _repairTimes[index] : null,
+        endTime: index < _repairEndTimes.length ? _repairEndTimes[index] : null,
+        repairedDevices: repairedDevices,
+        technician: index < _technicians.length ? _technicians[index] : null,
+      );
+    });
+    rows.sort((first, second) {
+      final firstTime = first.startTime;
+      final secondTime = second.startTime;
+      if (firstTime == null && secondTime != null) return 1;
+      if (firstTime != null && secondTime == null) return -1;
+      if (firstTime == null || secondTime == null) return 0;
+      final timeOrder = firstTime.compareTo(secondTime);
+      return timeOrder != 0 ? timeOrder : first.index.compareTo(second.index);
+    });
+    return rows;
+  }
 
   Future<void> _toggleExpanded() async {
     final willExpand = !_isExpanded;
@@ -381,13 +628,60 @@ class _ExpandableTicketRowState extends State<_ExpandableTicketRow> {
     await _loadDevices();
   }
 
+  Future<void> _cancelRequest() async {
+    final shouldCancel = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('ยืนยันยกเลิกคำร้อง'),
+        content: Text(
+          'ต้องการยกเลิกคำร้อง ${widget.ticket.ticketId} ใช่หรือไม่?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('กลับ'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('ยืนยันยกเลิก'),
+          ),
+        ],
+      ),
+    );
+    if (shouldCancel != true || !mounted) return;
+
+    final account = TemporaryAccountSession.instance.account;
+    if (account == null || !SupabaseConnection.isInitialized) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('กรุณาเข้าสู่ระบบอีกครั้ง')));
+      return;
+    }
+
+    try {
+      final response = await SupabaseConnection.client.functions.invoke(
+        'list-public-tickets',
+        headers: {'Authorization': 'Bearer ${account.accessToken}'},
+        body: {'action': 'cancel-request', 'ticketId': widget.ticket.ticketId},
+      );
+      if (response.data is! Map || response.data['cancelled'] != true) {
+        throw const FormatException('ไม่สามารถยืนยันการยกเลิกคำร้องได้');
+      }
+      if (mounted) widget.onTicketCancelled();
+    } on Exception catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('ยกเลิกคำร้องไม่สำเร็จ: $error')));
+    }
+  }
+
   Future<void> _loadDevices() async {
     if (_isLoading) return;
     if (!SupabaseConnection.isInitialized) {
       setState(() => _errorMessage = 'ยังไม่ได้เชื่อมต่อ Supabase');
       return;
     }
-
     setState(() {
       _isLoading = true;
       _errorMessage = null;
@@ -398,15 +692,37 @@ class _ExpandableTicketRowState extends State<_ExpandableTicketRow> {
         body: {'action': 'devices', 'ticketId': widget.ticket.ticketId},
       );
       final data = response.data;
-      if (data is! Map || data['devices'] is! List) {
+      if (data is! Map ||
+          data['devices'] is! List ||
+          (data['technician_history'] != null &&
+              data['technician_history'] is! List) ||
+          (data['fix_history_time_start'] != null &&
+              data['fix_history_time_start'] is! List) ||
+          (data['fix_history_time_end'] != null &&
+              data['fix_history_time_end'] is! List)) {
         throw const FormatException('รูปแบบข้อมูลอุปกรณ์ไม่ถูกต้อง');
       }
       final devices = (data['devices'] as List)
           .map(_TicketDevice.fromJson)
           .toList(growable: false);
+      final technicians = _stringList(
+        data['technician_history'],
+        'technician_history',
+      );
+      final repairTimes = _dateTimeList(
+        data['fix_history_time_start'],
+        'fix_history_time_start',
+      );
+      final repairEndTimes = _dateTimeList(
+        data['fix_history_time_end'],
+        'fix_history_time_end',
+      );
       if (!mounted) return;
       setState(() {
         _devices = devices;
+        _technicians = technicians;
+        _repairTimes = repairTimes;
+        _repairEndTimes = repairEndTimes;
         _hasLoaded = true;
         _isLoading = false;
       });
@@ -419,131 +735,214 @@ class _ExpandableTicketRowState extends State<_ExpandableTicketRow> {
     }
   }
 
+  Future<void> _editTicket() async {
+    if (!_hasLoaded) {
+      await _loadDevices();
+      if (!mounted || !_hasLoaded) return;
+    }
+
+    final changes = await showDialog<Map<String, Object?>>(
+      context: context,
+      builder: (context) =>
+          _AdminTicketEditDialog(ticket: widget.ticket, devices: _devices),
+    );
+    if (changes == null || !mounted) return;
+    final account = TemporaryAccountSession.instance.account;
+    if (account == null || !SupabaseConnection.isInitialized) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('กรุณาเข้าสู่ระบบด้วยบัญชีผู้ดูแลระบบ')),
+      );
+      return;
+    }
+
+    try {
+      final response = await SupabaseConnection.client.functions.invoke(
+        'list-public-tickets',
+        headers: {'Authorization': 'Bearer ${account.accessToken}'},
+        body: {
+          'action': 'admin-update-ticket',
+          'ticketId': widget.ticket.ticketId,
+          ...changes,
+        },
+      );
+      if (response.data is! Map || response.data['updated'] != true) {
+        throw const FormatException('ไม่สามารถยืนยันการบันทึกข้อมูลได้');
+      }
+      if (!mounted) return;
+      setState(() {
+        _hasLoaded = false;
+        _errorMessage = null;
+      });
+      widget.onTicketCancelled();
+      await _loadDevices();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('บันทึกข้อมูลคำร้องเรียบร้อยแล้ว')),
+      );
+    } on Exception catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('บันทึกข้อมูลคำร้องไม่สำเร็จ: $error')),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
     final rowColor = widget.index.isEven
         ? colors.surface
         : colors.surfaceContainerLowest;
+    final upcomingRepairPeriod = widget.ticket.upcomingRepairPeriod;
 
-    return Column(
-      children: [
-        InkWell(
-          onTap: _toggleExpanded,
-          child: Table(
-            columnWidths: {
-              for (var index = 0; index < 7; index++)
-                index: FixedColumnWidth(widget.columnWidth),
-            },
-            defaultVerticalAlignment: TableCellVerticalAlignment.middle,
-            border: TableBorder(
-              verticalInside: BorderSide(color: widget.borderColor, width: 0.7),
-              bottom: BorderSide(color: widget.borderColor, width: 0.7),
-            ),
-            children: [
-              TableRow(
-                children: [
-                  widget.tableCell(
-                    widget.ticket.ticketId,
-                    backgroundColor: rowColor,
-                    textStyle: widget.textStyle?.copyWith(
-                      color: colors.primary,
-                      fontWeight: FontWeight.w600,
+    return SliverMainAxisGroup(
+      slivers: [
+        SliverToBoxAdapter(
+          child: InkWell(
+            onTap: _toggleExpanded,
+            child: Table(
+              columnWidths: {
+                for (var index = 0; index < 6; index++)
+                  index: FixedColumnWidth(widget.columnWidth),
+                6: FixedColumnWidth(widget.scheduleColumnWidth),
+                7: FixedColumnWidth(widget.statusColumnWidth),
+              },
+              defaultVerticalAlignment: TableCellVerticalAlignment.middle,
+              border: TableBorder(
+                verticalInside: BorderSide(
+                  color: widget.borderColor,
+                  width: 0.7,
+                ),
+                bottom: BorderSide(color: widget.borderColor, width: 0.7),
+              ),
+              children: [
+                TableRow(
+                  decoration: BoxDecoration(color: rowColor),
+                  children: [
+                    widget.tableCell(
+                      widget.ticket.ticketId,
+                      backgroundColor: Colors.transparent,
+                      textStyle: widget.textStyle?.copyWith(
+                        color: colors.primary,
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
-                  ),
-                  widget.tableCell(
-                    widget.ticket.building,
-                    backgroundColor: rowColor,
-                    textStyle: widget.textStyle,
-                  ),
-                  widget.tableCell(
-                    widget.ticket.area ?? 'อาคาร ${widget.ticket.building}',
-                    backgroundColor: rowColor,
-                    textStyle: widget.textStyle,
-                  ),
-                  widget.tableCell(
-                    widget.ticket.floor ?? 'ไม่ระบุ',
-                    backgroundColor: rowColor,
-                    textStyle: widget.textStyle,
-                  ),
-                  widget.tableCell(
-                    widget.ticket.room ?? 'ไม่ระบุ',
-                    backgroundColor: rowColor,
-                    textStyle: widget.textStyle,
-                  ),
-                  widget.tableCell(
-                    widget.ticket.nextFixDate == null
-                        ? 'ยังไม่มีกำหนด'
-                        : _formatNextFixDate(widget.ticket.nextFixDate!),
-                    backgroundColor: rowColor,
-                    textStyle: widget.textStyle,
-                  ),
-                  widget.tableCell(
-                    '',
-                    backgroundColor: rowColor,
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 12,
-                            vertical: 6,
-                          ),
-                          decoration: BoxDecoration(
-                            color: colors.secondaryContainer,
-                            borderRadius: BorderRadius.circular(20),
-                          ),
-                          child: Text(
-                            widget.ticket.status,
-                            style: TextStyle(
-                              color: colors.onSecondaryContainer,
-                              fontSize: 12,
-                              fontWeight: FontWeight.w600,
+                    widget.tableCell(
+                      _formatRequestDate(widget.ticket.requestDate),
+                      backgroundColor: Colors.transparent,
+                      textStyle: widget.textStyle,
+                    ),
+                    widget.tableCell(
+                      widget.ticket.building,
+                      backgroundColor: Colors.transparent,
+                      textStyle: widget.textStyle,
+                    ),
+                    widget.tableCell(
+                      widget.ticket.area ?? 'อาคาร ${widget.ticket.building}',
+                      backgroundColor: Colors.transparent,
+                      textStyle: widget.textStyle,
+                    ),
+                    widget.tableCell(
+                      widget.ticket.floor ?? 'ไม่ระบุ',
+                      backgroundColor: Colors.transparent,
+                      textStyle: widget.textStyle,
+                    ),
+                    widget.tableCell(
+                      widget.ticket.room ?? 'ไม่ระบุ',
+                      backgroundColor: Colors.transparent,
+                      textStyle: widget.textStyle,
+                    ),
+                    widget.tableCell(
+                      upcomingRepairPeriod == null
+                          ? 'ยังไม่มีกำหนด'
+                          : _formatRepairDateRange(
+                              upcomingRepairPeriod.start,
+                              upcomingRepairPeriod.end,
+                            ),
+                      backgroundColor: Colors.transparent,
+                      textStyle: widget.textStyle,
+                    ),
+                    widget.tableCell(
+                      '',
+                      backgroundColor: Colors.transparent,
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 6,
+                            ),
+                            decoration: BoxDecoration(
+                              color: colors.secondaryContainer,
+                              borderRadius: BorderRadius.circular(20),
+                            ),
+                            child: Text(
+                              widget.ticket.status,
+                              style: TextStyle(
+                                color: colors.onSecondaryContainer,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                              ),
                             ),
                           ),
-                        ),
-                        const SizedBox(width: 4),
-                        Icon(
-                          _isExpanded
-                              ? Icons.keyboard_arrow_up
-                              : Icons.keyboard_arrow_down,
-                          color: colors.onSurfaceVariant,
-                        ),
-                      ],
+                          const SizedBox(width: 4),
+                          if (widget.myRequests &&
+                              widget.ticket.status == 'validating')
+                            IconButton(
+                              tooltip: 'ยกเลิกคำร้อง',
+                              onPressed: _cancelRequest,
+                              icon: const Icon(Icons.close),
+                              iconSize: 18,
+                              padding: EdgeInsets.zero,
+                              constraints: const BoxConstraints.tightFor(
+                                width: 30,
+                                height: 30,
+                              ),
+                              color: colors.error,
+                            ),
+                          Icon(
+                            _isExpanded
+                                ? Icons.keyboard_arrow_up
+                                : Icons.keyboard_arrow_down,
+                            size: 20,
+                            color: colors.onSurfaceVariant,
+                          ),
+                        ],
+                      ),
                     ),
-                  ),
-                ],
-              ),
-            ],
+                  ],
+                ),
+              ],
+            ),
           ),
         ),
-        if (_isExpanded) _buildDevicesPanel(context, rowColor),
+        if (_isExpanded) ..._buildExpandedTicketSlivers(context, rowColor),
       ],
     );
   }
 
-  Widget _buildDevicesPanel(BuildContext context, Color rowColor) {
+  List<Widget> _buildExpandedTicketSlivers(
+    BuildContext context,
+    Color rowColor,
+  ) {
     final colors = Theme.of(context).colorScheme;
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: colors.surfaceContainerLow,
-        border: Border(bottom: BorderSide(color: widget.borderColor)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Text(
-            'อุปกรณ์ย่อย',
-            style: Theme.of(
-              context,
-            ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
+    if (_isLoading) {
+      return [
+        SliverToBoxAdapter(child: _buildTicketDetailsHeading(context)),
+        SliverToBoxAdapter(
+          child: _buildDetailsMessage(
+            const Center(child: CircularProgressIndicator()),
+            colors,
           ),
-          const SizedBox(height: 10),
-          if (_isLoading)
-            const Center(child: CircularProgressIndicator())
-          else if (_errorMessage case final error?)
+        ),
+      ];
+    }
+    if (_errorMessage case final error?) {
+      return [
+        SliverToBoxAdapter(child: _buildTicketDetailsHeading(context)),
+        SliverToBoxAdapter(
+          child: _buildDetailsMessage(
             Wrap(
               crossAxisAlignment: WrapCrossAlignment.center,
               spacing: 12,
@@ -555,70 +954,331 @@ class _ExpandableTicketRowState extends State<_ExpandableTicketRow> {
                   label: const Text('ลองอีกครั้ง'),
                 ),
               ],
-            )
-          else if (_devices.isEmpty)
-            const Text('ไม่มีรายการอุปกรณ์ย่อย')
-          else
-            _buildDevicesTable(context),
+            ),
+            colors,
+          ),
+        ),
+      ];
+    }
+    if (_showRepairHistory) {
+      final history = _repairHistory;
+      if (history.isEmpty) {
+        return [
+          SliverToBoxAdapter(child: _buildTicketDetailsHeading(context)),
+          SliverToBoxAdapter(
+            child: _buildDetailsMessage(
+              const Text('ยังไม่มีข้อมูลประวัติการซ่อม'),
+              colors,
+            ),
+          ),
+        ];
+      }
+      return [
+        SliverPersistentHeader(
+          pinned: true,
+          delegate: _TicketTableHeaderDelegate(
+            child: _buildPinnedTicketDetailsHeader(
+              context,
+              _buildRepairHistoryHeader(context),
+            ),
+            height: 86,
+          ),
+        ),
+        SliverList(
+          delegate: SliverChildBuilderDelegate(
+            (context, index) => _buildRepairHistoryRow(context, history[index]),
+            childCount: history.length,
+          ),
+        ),
+      ];
+    }
+    if (_devices.isEmpty) {
+      return [
+        SliverToBoxAdapter(child: _buildTicketDetailsHeading(context)),
+        SliverToBoxAdapter(
+          child: _buildDetailsMessage(
+            const Text('ไม่มีรายการอุปกรณ์ย่อย'),
+            colors,
+          ),
+        ),
+      ];
+    }
+    return [
+      SliverPersistentHeader(
+        pinned: true,
+        delegate: _TicketTableHeaderDelegate(
+          child: _buildPinnedTicketDetailsHeader(
+            context,
+            _buildDevicesHeader(context),
+          ),
+          height: 86,
+        ),
+      ),
+      SliverList(
+        delegate: SliverChildBuilderDelegate(
+          (context, index) => _buildDeviceRow(context, _devices[index]),
+          childCount: _devices.length,
+        ),
+      ),
+    ];
+  }
+
+  Widget _buildTicketDetailsHeading(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return Container(
+      width: double.infinity,
+      height: 42,
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      color: colors.surfaceContainerLow,
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              _showRepairHistory ? 'ประวัติการซ่อม' : 'อุปกรณ์ย่อย',
+              style: Theme.of(
+                context,
+              ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
+            ),
+          ),
+          if (widget.adminMode)
+            IconButton(
+              tooltip: 'แก้ไขข้อมูลคำร้อง',
+              onPressed: _isLoading ? null : _editTicket,
+              icon: const Icon(Icons.edit_outlined),
+              iconSize: 20,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints.tightFor(width: 40, height: 40),
+            ),
+          TextButton.icon(
+            onPressed: () =>
+                setState(() => _showRepairHistory = !_showRepairHistory),
+            icon: Icon(
+              _showRepairHistory ? Icons.devices_other_outlined : Icons.history,
+            ),
+            label: Text(_showRepairHistory ? 'อุปกรณ์ย่อย' : 'ประวัติการซ่อม'),
+          ),
         ],
       ),
     );
   }
 
-  Widget _buildDevicesTable(BuildContext context) {
+  Widget _buildPinnedTicketDetailsHeader(
+    BuildContext context,
+    Widget tableHeader,
+  ) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _buildTicketDetailsHeading(context),
+        SizedBox(height: 44, child: tableHeader),
+      ],
+    );
+  }
+
+  Widget _buildDetailsMessage(Widget message, ColorScheme colors) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: colors.surfaceContainerLow,
+        border: Border(bottom: BorderSide(color: widget.borderColor)),
+      ),
+      child: message,
+    );
+  }
+
+  Map<int, TableColumnWidth> _historyColumnWidths(double width) => {
+    0: FixedColumnWidth(width * 0.22),
+    1: FixedColumnWidth(width * 0.43),
+    2: FixedColumnWidth(width * 0.35),
+  };
+
+  Widget _detailsTable({
+    required Map<int, TableColumnWidth> columnWidths,
+    required List<double> columnBreakpoints,
+    required List<TableRow> rows,
+  }) {
+    return CustomPaint(
+      foregroundPainter: _VerticalTableDividersPainter(
+        columnBreakpoints: columnBreakpoints,
+        color: widget.borderColor,
+      ),
+      child: Table(
+        columnWidths: columnWidths,
+        defaultVerticalAlignment: TableCellVerticalAlignment.middle,
+        border: TableBorder(
+          bottom: BorderSide(color: widget.borderColor, width: 0.7),
+        ),
+        children: rows,
+      ),
+    );
+  }
+
+  Widget _buildRepairHistoryHeader(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
     final headings = Theme.of(context).textTheme.labelMedium?.copyWith(
       color: colors.onSurfaceVariant,
       fontWeight: FontWeight.w700,
     );
-    final values = Theme.of(context).textTheme.bodyMedium;
-    final deviceColumnWidth = widget.columnWidth * 1.1;
-    final detailColumnWidth = widget.columnWidth * 2.6;
-    final statusColumnWidth = widget.columnWidth * 1.6;
-
-    return Table(
-      columnWidths: {
-        0: FixedColumnWidth(widget.columnWidth * 0.7),
-        1: FixedColumnWidth(deviceColumnWidth),
-        2: FixedColumnWidth(detailColumnWidth),
-        3: FixedColumnWidth(statusColumnWidth),
-      },
-      defaultVerticalAlignment: TableCellVerticalAlignment.middle,
-      border: TableBorder(
-        horizontalInside: BorderSide(color: widget.borderColor, width: 0.7),
-      ),
-      children: [
-        TableRow(
-          children: [
-            for (final label in const [
-              'ลำดับ',
-              'อุปกรณ์',
-              'รายละเอียด',
-              'สถานะ',
-            ])
-              Padding(
-                padding: const EdgeInsets.symmetric(
-                  vertical: 10,
-                  horizontal: 8,
-                ),
-                child: Text(label, style: headings),
+    return LayoutBuilder(
+      builder: (context, constraints) => SizedBox(
+        width: constraints.maxWidth,
+        child: Container(
+          color: colors.surfaceContainerLow,
+          child: _detailsTable(
+            columnWidths: _historyColumnWidths(constraints.maxWidth),
+            columnBreakpoints: const [0.22, 0.65],
+            rows: [
+              TableRow(
+                children: [
+                  for (final label in const [
+                    'ช่วงเวลาที่เข้าซ่อม',
+                    'สิ่งที่ซ่อมสำเร็จ',
+                    'ผู้รับผิดชอบงานซ่อม',
+                  ])
+                    _deviceCell(label, headings),
+                ],
               ),
-          ],
-        ),
-        for (final device in _devices)
-          TableRow(
-            children: [
-              _deviceCell(device.deviceId.toString(), values),
-              _deviceCell(device.name, values),
-              _deviceCell(device.description ?? '-', values),
-              _deviceCell(device.status, values),
             ],
           ),
-      ],
+        ),
+      ),
     );
   }
 
-  String _formatNextFixDate(DateTime dateTime) {
+  Widget _buildRepairHistoryRow(BuildContext context, _RepairHistoryRow entry) {
+    final values = Theme.of(context).textTheme.bodyMedium;
+    final colors = Theme.of(context).colorScheme;
+    return LayoutBuilder(
+      builder: (context, constraints) => SizedBox(
+        width: constraints.maxWidth,
+        child: Container(
+          color: colors.surfaceContainerLow,
+          child: _detailsTable(
+            columnWidths: _historyColumnWidths(constraints.maxWidth),
+            columnBreakpoints: const [0.22, 0.65],
+            rows: [
+              TableRow(
+                children: [
+                  _deviceCell(
+                    _formatRepairTimeRange(entry.startTime, entry.endTime),
+                    values,
+                  ),
+                  _deviceCell(
+                    entry.repairedDevices.isEmpty
+                        ? 'ไม่มี'
+                        : entry.repairedDevices,
+                    values,
+                  ),
+                  _deviceCell(entry.technician ?? '-', values),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Map<int, TableColumnWidth> _deviceColumnWidths(double width) {
+    return {
+      0: FixedColumnWidth(width * 0.10),
+      1: FixedColumnWidth(width * 0.20),
+      2: FixedColumnWidth(width * 0.50),
+      3: FixedColumnWidth(width * 0.20),
+    };
+  }
+
+  Widget _buildDevicesHeader(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final headings = Theme.of(context).textTheme.labelMedium?.copyWith(
+      color: colors.onSurfaceVariant,
+      fontWeight: FontWeight.w700,
+    );
+    return LayoutBuilder(
+      builder: (context, constraints) => SizedBox(
+        width: constraints.maxWidth,
+        child: Container(
+          color: colors.surfaceContainerLow,
+          child: _detailsTable(
+            columnWidths: _deviceColumnWidths(constraints.maxWidth),
+            columnBreakpoints: const [0.10, 0.30, 0.80],
+            rows: [
+              TableRow(
+                children: [
+                  for (final label in const [
+                    'ลำดับ',
+                    'อุปกรณ์',
+                    'รายละเอียด',
+                    'สถานะ',
+                  ])
+                    _deviceCell(label, headings),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDeviceRow(BuildContext context, _TicketDevice device) {
+    final values = Theme.of(context).textTheme.bodyMedium;
+    final colors = Theme.of(context).colorScheme;
+    return LayoutBuilder(
+      builder: (context, constraints) => SizedBox(
+        width: constraints.maxWidth,
+        child: Container(
+          color: colors.surfaceContainerLow,
+          child: _detailsTable(
+            columnWidths: _deviceColumnWidths(constraints.maxWidth),
+            columnBreakpoints: const [0.10, 0.30, 0.80],
+            rows: [
+              TableRow(
+                children: [
+                  _deviceCell(device.deviceId.toString(), values),
+                  _deviceCell(device.name, values),
+                  _deviceCell(device.description ?? '-', values),
+                  _deviceCell(device.status, values),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  String _formatRepairTimeRange(DateTime? start, DateTime? end) {
+    if (start == null) return end == null ? '-' : _formatDateTime(end);
+    if (end == null || _isSameLocalDay(start, end)) {
+      return _formatDateTime(start);
+    }
+    return '${_formatDateTime(start)} - ${_formatDateTime(end)}';
+  }
+
+  String _formatRepairDateRange(DateTime? start, DateTime? end) {
+    if (start == null) return end == null ? '-' : _formatDate(end);
+    if (end == null) return _formatDate(start);
+    return '${_formatDate(start)}\n-\n${_formatDate(end)}';
+  }
+
+  bool _isSameLocalDay(DateTime first, DateTime second) {
+    final firstLocal = first.toLocal();
+    final secondLocal = second.toLocal();
+    return firstLocal.year == secondLocal.year &&
+        firstLocal.month == secondLocal.month &&
+        firstLocal.day == secondLocal.day;
+  }
+
+  String _formatDate(DateTime dateTime) {
+    final localDateTime = dateTime.toLocal();
+    final day = localDateTime.day.toString().padLeft(2, '0');
+    final month = localDateTime.month.toString().padLeft(2, '0');
+    return '$day/$month/${localDateTime.year}';
+  }
+
+  String _formatDateTime(DateTime dateTime) {
     final localDateTime = dateTime.toLocal();
     final day = localDateTime.day.toString().padLeft(2, '0');
     final month = localDateTime.month.toString().padLeft(2, '0');
@@ -630,39 +1290,418 @@ class _ExpandableTicketRowState extends State<_ExpandableTicketRow> {
   Widget _deviceCell(String text, TextStyle? style) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
-      child: Text(text, style: style),
+      child: Text(
+        text,
+        style: style,
+        softWrap: true,
+        overflow: TextOverflow.clip,
+      ),
     );
+  }
+}
+
+class _AdminTicketEditDialog extends StatefulWidget {
+  const _AdminTicketEditDialog({required this.ticket, required this.devices});
+
+  final _Ticket ticket;
+  final List<_TicketDevice> devices;
+
+  @override
+  State<_AdminTicketEditDialog> createState() => _AdminTicketEditDialogState();
+}
+
+class _AdminTicketEditDialogState extends State<_AdminTicketEditDialog> {
+  static const _statuses = [
+    'validating',
+    'pending',
+    'finish',
+    'rejected',
+    'cancel',
+  ];
+  final _formKey = GlobalKey<FormState>();
+  late final TextEditingController _buildingController;
+  late final TextEditingController _areaController;
+  late final TextEditingController _floorController;
+  late final TextEditingController _roomController;
+  late final TextEditingController _technicianTeamController;
+  late final List<_DeviceEditControllers> _deviceControllers;
+  late String _status;
+
+  @override
+  void initState() {
+    super.initState();
+    final ticket = widget.ticket;
+    _buildingController = TextEditingController(text: ticket.building);
+    _areaController = TextEditingController(text: ticket.area ?? '');
+    _floorController = TextEditingController(text: ticket.floor ?? '');
+    _roomController = TextEditingController(text: ticket.room ?? '');
+    _technicianTeamController = TextEditingController(
+      text: ticket.technicianTeam ?? '',
+    );
+    _status = _statuses.contains(ticket.status) ? ticket.status : 'validating';
+    _deviceControllers = widget.devices
+        .map(_DeviceEditControllers.fromDevice)
+        .toList(growable: false);
+  }
+
+  @override
+  void dispose() {
+    _buildingController.dispose();
+    _areaController.dispose();
+    _floorController.dispose();
+    _roomController.dispose();
+    _technicianTeamController.dispose();
+    for (final device in _deviceControllers) {
+      device.dispose();
+    }
+    super.dispose();
+  }
+
+  void _save() {
+    if (!_formKey.currentState!.validate()) return;
+    final devices = <Map<String, Object?>>[];
+    for (var index = 0; index < widget.devices.length; index++) {
+      final device = widget.devices[index];
+      final fields = _deviceControllers[index];
+      final rawDates = fields.nextFixDate.text.split('\n');
+      final parsedDates = <DateTime?>[];
+      for (final rawValue in rawDates) {
+        final rawDate = rawValue.trim();
+        final parsedDate = rawDate.isEmpty ? null : DateTime.tryParse(rawDate);
+        if (rawDate.isNotEmpty && parsedDate == null) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('วันซ่อมถัดไปของ ${device.name} ไม่ถูกต้อง'),
+            ),
+          );
+          return;
+        }
+        parsedDates.add(parsedDate);
+      }
+      devices.add({
+        'deviceid': device.deviceId,
+        'device': fields.name.text.trim(),
+        'discription': fields.description.text.trim(),
+        'status': fields.status.text.trim(),
+        'next_fix_date': parsedDates
+            .map((date) => date?.toIso8601String())
+            .toList(),
+        'technician_comment': fields.technicianComments.text
+            .split('\n')
+            .map((comment) => comment.trim())
+            .where((comment) => comment.isNotEmpty)
+            .toList(),
+      });
+    }
+    Navigator.of(context).pop({
+      'request': {
+        'building': _buildingController.text.trim(),
+        'area':
+            _buildingController.text.trim() != 'other' ||
+                _areaController.text.trim().isEmpty
+            ? null
+            : _areaController.text.trim(),
+        'floor': _floorController.text.trim().isEmpty
+            ? null
+            : _floorController.text.trim(),
+        'room': _roomController.text.trim().isEmpty
+            ? null
+            : _roomController.text.trim(),
+        'status': _status,
+        'technician_team': _technicianTeamController.text.trim().isEmpty
+            ? null
+            : _technicianTeamController.text.trim(),
+      },
+      'devices': devices,
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text('แก้ไขคำร้อง ${widget.ticket.ticketId}'),
+      content: SizedBox(
+        width: 560,
+        child: Form(
+          key: _formKey,
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  'ข้อมูลคำร้อง',
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+                TextFormField(
+                  controller: _buildingController,
+                  decoration: const InputDecoration(
+                    labelText: 'อาคาร (เลขอาคาร หรือ other)',
+                  ),
+                  validator: (value) {
+                    final building = value?.trim() ?? '';
+                    if (building != 'other' &&
+                        !RegExp(r'^\d{1,2}$').hasMatch(building)) {
+                      return 'กรอกเลขอาคาร 1-2 หลัก หรือ other';
+                    }
+                    return null;
+                  },
+                ),
+                TextFormField(
+                  controller: _areaController,
+                  decoration: const InputDecoration(
+                    labelText: 'บริเวณ (กรณีเลือก other)',
+                  ),
+                  validator: (value) =>
+                      _buildingController.text.trim() == 'other' &&
+                          (value == null || value.trim().isEmpty)
+                      ? 'กรุณาระบุบริเวณ'
+                      : null,
+                ),
+                TextFormField(
+                  controller: _floorController,
+                  decoration: const InputDecoration(labelText: 'ชั้น'),
+                  validator: (value) {
+                    final floor = value?.trim() ?? '';
+                    final normalizedFloor = floor.replaceFirst(
+                      RegExp(r'^0+'),
+                      '',
+                    );
+                    final floorNumber = int.tryParse(
+                      normalizedFloor.isEmpty ? '0' : normalizedFloor,
+                    );
+                    if (floor.isNotEmpty &&
+                        (!RegExp(r'^\d+$').hasMatch(floor) ||
+                            normalizedFloor.length > 2 ||
+                            floorNumber == null ||
+                            floorNumber > 50)) {
+                      return 'ชั้นต้องเป็นตัวเลขระหว่าง 0-50';
+                    }
+                    return null;
+                  },
+                ),
+                TextFormField(
+                  controller: _roomController,
+                  decoration: const InputDecoration(labelText: 'ห้อง'),
+                  validator: (value) {
+                    final room = value?.trim() ?? '';
+                    if (room.isNotEmpty &&
+                        !RegExp(r'^[a-zA-Z0-9-]{1,8}$').hasMatch(room)) {
+                      return 'ห้องกรอกได้ไม่เกิน 8 ตัวอักษร';
+                    }
+                    return null;
+                  },
+                ),
+                DropdownButtonFormField<String>(
+                  value: _status,
+                  decoration: const InputDecoration(labelText: 'สถานะคำร้อง'),
+                  items: [
+                    for (final status in _statuses)
+                      DropdownMenuItem(value: status, child: Text(status)),
+                  ],
+                  onChanged: (value) {
+                    if (value != null) setState(() => _status = value);
+                  },
+                ),
+                TextFormField(
+                  controller: _technicianTeamController,
+                  decoration: const InputDecoration(labelText: 'ทีมช่าง'),
+                  maxLength: 120,
+                ),
+                const Divider(height: 32),
+                Text(
+                  'ข้อมูลดำเนินงานและอุปกรณ์',
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+                for (var index = 0; index < widget.devices.length; index++)
+                  _buildDeviceFields(index),
+              ],
+            ),
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('ยกเลิก'),
+        ),
+        FilledButton.icon(
+          onPressed: _save,
+          icon: const Icon(Icons.save_outlined),
+          label: const Text('บันทึก'),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildDeviceFields(int index) {
+    final device = widget.devices[index];
+    final fields = _deviceControllers[index];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const SizedBox(height: 12),
+        Text(
+          'อุปกรณ์ ${device.deviceId}',
+          style: Theme.of(context).textTheme.titleSmall,
+        ),
+        TextFormField(
+          controller: fields.name,
+          decoration: const InputDecoration(labelText: 'ชื่ออุปกรณ์'),
+          validator: (value) => value == null || value.trim().isEmpty
+              ? 'กรุณาระบุชื่ออุปกรณ์'
+              : null,
+        ),
+        TextFormField(
+          controller: fields.description,
+          decoration: const InputDecoration(labelText: 'รายละเอียดอุปกรณ์'),
+          maxLines: 2,
+        ),
+        TextFormField(
+          controller: fields.status,
+          decoration: const InputDecoration(labelText: 'สถานะอุปกรณ์'),
+          validator: (value) =>
+              value == null || value.trim().isEmpty ? 'กรุณาระบุสถานะ' : null,
+        ),
+        TextFormField(
+          controller: fields.nextFixDate,
+          decoration: const InputDecoration(
+            labelText: 'วันเข้าซ่อมถัดไป (หนึ่งรายการต่อบรรทัด)',
+            hintText: 'YYYY-MM-DD',
+          ),
+          keyboardType: TextInputType.datetime,
+          maxLines: 3,
+          validator: (value) =>
+              (value?.split('\n') ?? const <String>[]).any(
+                (dateValue) =>
+                    dateValue.trim().isNotEmpty &&
+                    DateTime.tryParse(dateValue.trim()) == null,
+              )
+              ? 'กรอกวันที่ในรูปแบบ YYYY-MM-DD'
+              : null,
+        ),
+        TextFormField(
+          controller: fields.technicianComments,
+          decoration: const InputDecoration(
+            labelText: 'บันทึกช่าง (หนึ่งรายการต่อบรรทัด)',
+          ),
+          maxLines: 3,
+        ),
+      ],
+    );
+  }
+}
+
+class _DeviceEditControllers {
+  _DeviceEditControllers({
+    required this.name,
+    required this.description,
+    required this.status,
+    required this.nextFixDate,
+    required this.technicianComments,
+  });
+
+  final TextEditingController name;
+  final TextEditingController description;
+  final TextEditingController status;
+  final TextEditingController nextFixDate;
+  final TextEditingController technicianComments;
+
+  factory _DeviceEditControllers.fromDevice(_TicketDevice device) {
+    return _DeviceEditControllers(
+      name: TextEditingController(text: device.name),
+      description: TextEditingController(text: device.description ?? ''),
+      status: TextEditingController(text: device.status),
+      nextFixDate: TextEditingController(
+        text: device.nextFixDates
+            .map((date) => date?.toIso8601String().split('T').first ?? '')
+            .join('\n'),
+      ),
+      technicianComments: TextEditingController(
+        text: device.technicianComments.whereType<String>().join('\n'),
+      ),
+    );
+  }
+
+  void dispose() {
+    name.dispose();
+    description.dispose();
+    status.dispose();
+    nextFixDate.dispose();
+    technicianComments.dispose();
   }
 }
 
 class _Ticket {
   const _Ticket({
     required this.ticketId,
+    required this.requestDate,
     required this.building,
     required this.area,
     required this.floor,
     required this.room,
     required this.nextFixDate,
     required this.status,
+    required this.technicianTeam,
+    required this.repairTimeStarts,
+    required this.repairTimeEnds,
   });
 
   final String ticketId;
+  final DateTime requestDate;
   final String building;
   final String? area;
   final String? floor;
   final String? room;
   final DateTime? nextFixDate;
   final String status;
+  final String? technicianTeam;
+  final List<DateTime?> repairTimeStarts;
+  final List<DateTime?> repairTimeEnds;
+
+  List<_RepairTimeRange> get repairPeriods {
+    final length = repairTimeStarts.length > repairTimeEnds.length
+        ? repairTimeStarts.length
+        : repairTimeEnds.length;
+    return List.generate(
+      length,
+      (index) => _RepairTimeRange(
+        start: index < repairTimeStarts.length ? repairTimeStarts[index] : null,
+        end: index < repairTimeEnds.length ? repairTimeEnds[index] : null,
+      ),
+      growable: false,
+    );
+  }
+
+  _RepairTimeRange? get upcomingRepairPeriod {
+    final now = DateTime.now();
+    _RepairTimeRange? nearestPeriod;
+    for (final period in repairPeriods) {
+      final end = period.end;
+      if (end == null || !end.isAfter(now)) continue;
+      final nearestEnd = nearestPeriod?.end;
+      if (nearestEnd == null || end.isBefore(nearestEnd)) {
+        nearestPeriod = period;
+      }
+    }
+    return nearestPeriod;
+  }
 
   factory _Ticket.fromJson(dynamic value) {
     if (value is! Map ||
         value['TicketId'] is! String ||
+        value['request_date'] is! String ||
         value['building'] is! String ||
         value['status'] is! String ||
         (value['area'] != null && value['area'] is! String) ||
         (value['floor'] != null && value['floor'] is! String) ||
         (value['room'] != null && value['room'] is! String) ||
-        (value['next_fix_date'] != null && value['next_fix_date'] is! String)) {
+        (value['technician_team'] != null &&
+            value['technician_team'] is! String) ||
+        (value['next_fix_date'] != null && value['next_fix_date'] is! String) ||
+        (value['fix_history_time_start'] != null &&
+            value['fix_history_time_start'] is! List) ||
+        (value['fix_history_time_end'] != null &&
+            value['fix_history_time_end'] is! List)) {
       throw const FormatException('ข้อมูล Ticket ไม่ครบถ้วน');
     }
     final nextFixDateValue = value['next_fix_date'] as String?;
@@ -672,16 +1711,38 @@ class _Ticket {
     if (nextFixDateValue != null && nextFixDate == null) {
       throw const FormatException('รูปแบบวันเข้าซ่อมไม่ถูกต้อง');
     }
+    final requestDateValue = value['request_date'] as String;
+    final requestDate = DateTime.tryParse(requestDateValue);
+    if (requestDate == null) {
+      throw const FormatException('รูปแบบวันที่แจ้งไม่ถูกต้อง');
+    }
     return _Ticket(
       ticketId: value['TicketId'] as String,
+      requestDate: requestDate,
       building: value['building'] as String,
       area: value['area'] as String?,
       floor: value['floor'] as String?,
       room: value['room'] as String?,
       nextFixDate: nextFixDate,
       status: value['status'] as String,
+      technicianTeam: value['technician_team'] as String?,
+      repairTimeStarts: _dateTimeList(
+        value['fix_history_time_start'],
+        'fix_history_time_start',
+      ),
+      repairTimeEnds: _dateTimeList(
+        value['fix_history_time_end'],
+        'fix_history_time_end',
+      ),
     );
   }
+}
+
+class _RepairTimeRange {
+  const _RepairTimeRange({required this.start, required this.end});
+
+  final DateTime? start;
+  final DateTime? end;
 }
 
 class _TicketDevice {
@@ -690,26 +1751,191 @@ class _TicketDevice {
     required this.name,
     required this.description,
     required this.status,
+    required this.nextFixDates,
+    required this.technicianComments,
+    required this.repairHistory,
   });
 
   final int deviceId;
   final String name;
   final String? description;
   final String status;
+  final List<DateTime?> nextFixDates;
+  final List<String?> technicianComments;
+  final List<_RepairHistoryEntry> repairHistory;
 
   factory _TicketDevice.fromJson(dynamic value) {
     if (value is! Map ||
         value['deviceid'] is! int ||
         value['device'] is! String ||
         value['status'] is! String ||
-        (value['discription'] != null && value['discription'] is! String)) {
+        (value['discription'] != null && value['discription'] is! String) ||
+        (value['next_fix_date'] != null && value['next_fix_date'] is! List)) {
       throw const FormatException('ข้อมูลอุปกรณ์ไม่ครบถ้วน');
     }
+    final nextFixDates = _dateTimeList(value['next_fix_date'], 'next_fix_date');
+    final technicianComments = _stringList(
+      value['technician_comment'],
+      'technician_comment',
+    );
+    final progress = _boolList(
+      value['fix_history_progress'],
+      'fix_history_progress',
+    );
+    final historyLength = progress.length;
+    final repairHistory = List.generate(
+      historyLength,
+      (index) => _RepairHistoryEntry(
+        deviceName: value['device'] as String,
+        index: index,
+        progress: index < progress.length ? progress[index] : null,
+      ),
+      growable: false,
+    );
     return _TicketDevice(
       deviceId: value['deviceid'] as int,
       name: value['device'] as String,
       description: value['discription'] as String?,
       status: value['status'] as String,
+      nextFixDates: nextFixDates,
+      technicianComments: technicianComments,
+      repairHistory: repairHistory,
     );
   }
+}
+
+class _RepairHistoryEntry {
+  const _RepairHistoryEntry({
+    required this.deviceName,
+    required this.index,
+    required this.progress,
+  });
+
+  final String deviceName;
+  final int index;
+  final bool? progress;
+}
+
+class _RepairHistoryRow {
+  const _RepairHistoryRow({
+    required this.index,
+    required this.startTime,
+    required this.endTime,
+    required this.repairedDevices,
+    required this.technician,
+  });
+
+  final int index;
+  final DateTime? startTime;
+  final DateTime? endTime;
+  final String repairedDevices;
+  final String? technician;
+}
+
+class _TicketTableHeaderDelegate extends SliverPersistentHeaderDelegate {
+  const _TicketTableHeaderDelegate({required this.child, required this.height});
+
+  final Widget child;
+  final double height;
+
+  @override
+  double get minExtent => height;
+
+  @override
+  double get maxExtent => height;
+
+  @override
+  Widget build(
+    BuildContext context,
+    double shrinkOffset,
+    bool overlapsContent,
+  ) => SizedBox.expand(child: child);
+
+  @override
+  bool shouldRebuild(covariant _TicketTableHeaderDelegate oldDelegate) =>
+      oldDelegate.child != child || oldDelegate.height != height;
+}
+
+class _VerticalTableDividersPainter extends CustomPainter {
+  const _VerticalTableDividersPainter({
+    required this.columnBreakpoints,
+    required this.color,
+  });
+
+  final List<double> columnBreakpoints;
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = 0.7
+      ..strokeCap = StrokeCap.square;
+    for (final breakpoint in columnBreakpoints) {
+      final x = size.width * breakpoint;
+      canvas.drawLine(Offset(x, 0), Offset(x, size.height), paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _VerticalTableDividersPainter oldDelegate) =>
+      oldDelegate.color != color ||
+      oldDelegate.columnBreakpoints != columnBreakpoints;
+}
+
+String _formatRequestDate(DateTime dateTime) {
+  final localDateTime = dateTime.toLocal();
+  final day = localDateTime.day.toString().padLeft(2, '0');
+  final month = localDateTime.month.toString().padLeft(2, '0');
+  return '$day/$month/${localDateTime.year}';
+}
+
+List<DateTime?> _dateTimeList(Object? value, String fieldName) {
+  if (value == null) return const [];
+  if (value is! List) {
+    throw FormatException('รูปแบบข้อมูล $fieldName ไม่ถูกต้อง');
+  }
+  return value
+      .map((item) {
+        if (item == null) return null;
+        if (item is! String) {
+          throw FormatException('รูปแบบข้อมูล $fieldName ไม่ถูกต้อง');
+        }
+        final dateTime = DateTime.tryParse(item);
+        if (dateTime == null) {
+          throw FormatException('รูปแบบวันเวลาใน $fieldName ไม่ถูกต้อง');
+        }
+        return dateTime;
+      })
+      .toList(growable: false);
+}
+
+List<String?> _stringList(Object? value, String fieldName) {
+  if (value == null) return const [];
+  if (value is! List) {
+    throw FormatException('รูปแบบข้อมูล $fieldName ไม่ถูกต้อง');
+  }
+  return value
+      .map((item) {
+        if (item != null && item is! String) {
+          throw FormatException('รูปแบบข้อมูล $fieldName ไม่ถูกต้อง');
+        }
+        return item as String?;
+      })
+      .toList(growable: false);
+}
+
+List<bool?> _boolList(Object? value, String fieldName) {
+  if (value == null) return const [];
+  if (value is! List) {
+    throw FormatException('รูปแบบข้อมูล $fieldName ไม่ถูกต้อง');
+  }
+  return value
+      .map((item) {
+        if (item != null && item is! bool) {
+          throw FormatException('รูปแบบข้อมูล $fieldName ไม่ถูกต้อง');
+        }
+        return item as bool?;
+      })
+      .toList(growable: false);
 }

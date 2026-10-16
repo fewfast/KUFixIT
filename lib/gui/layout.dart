@@ -10,6 +10,7 @@ import '../database/connect.dart';
 import 'fixRequest.dart';
 import 'personal_info_page.dart';
 import 'superRegister.dart';
+import 'technicianManager.dart';
 import 'ticketMonitor.dart';
 
 class Layout extends StatefulWidget {
@@ -185,10 +186,18 @@ class _LayoutState extends State<Layout> {
         children: [
           for (final page in pages)
             if (page.id == 'ticket_monitor' ||
-                (role == 'User' && page.id == 'dashboard'))
-              const TicketMonitor()
+                ((role == 'User' || role == 'Admin' ||
+                        role == 'SuperAdmin') &&
+                    page.id == 'dashboard'))
+              TicketMonitor(
+                adminMode: role == 'Admin' || role == 'SuperAdmin',
+              )
+            else if (page.id == 'my_requests')
+              const TicketMonitor(myRequests: true)
             else if (page.id == 'new_request')
               const FixRequestPage()
+            else if (page.id == 'technician_manager')
+              const TechnicianManagerPage()
             else
               _PageContent(page: page, role: role),
         ],
@@ -468,6 +477,12 @@ List<_PageInfo> _pagesFor(String role) {
         'จัดการบัญชีและบทบาทผู้ใช้',
       ),
       const _PageInfo(
+        'technician_manager',
+        'จัดการช่างเทคนิค',
+        Icons.engineering_outlined,
+        'จัดการบัญชีและข้อมูลช่างเทคนิค',
+      ),
+      const _PageInfo(
         'reports',
         'รายงาน',
         Icons.assessment_outlined,
@@ -487,6 +502,12 @@ List<_PageInfo> _pagesFor(String role) {
         'จัดการผู้ใช้',
         Icons.people_outline,
         'จัดการบัญชีและบทบาทผู้ใช้',
+      ),
+      const _PageInfo(
+        'technician_manager',
+        'จัดการช่างเทคนิค',
+        Icons.engineering_outlined,
+        'จัดการบัญชีและข้อมูลช่างเทคนิค',
       ),
       const _PageInfo(
         'reports',
