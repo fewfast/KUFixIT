@@ -204,7 +204,7 @@ async function getRequesterUid(
     subject = data.user.id;
   }
 
-  if (/^\d{10}$/.test(subject)) return subject;
+  if (/^(?:\d{10}|u_\d{10})$/.test(subject)) return subject;
   if (
     !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
       .test(subject)
@@ -223,7 +223,10 @@ async function getRequesterUid(
     const uidText = String(uid);
     return /^\d{10}$/.test(uidText) ? uidText : null;
   }
-  return typeof uid === "string" && /^\d{10}$/.test(uid) ? uid : null;
+  return typeof uid === "string" &&
+      /^(?:\d{10}|u_\d{10})$/.test(uid)
+    ? uid
+    : null;
 }
 
 Deno.serve(async (request) => {
@@ -262,7 +265,7 @@ Deno.serve(async (request) => {
   }
   if (!requester) {
     return jsonResponse(400, {
-      error: "A registered account with a 10-digit UID is required to submit a repair request.",
+      error: "A registered account with a valid UID is required to submit a repair request.",
     });
   }
 

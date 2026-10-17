@@ -53,12 +53,20 @@ class FixRequestPage extends StatefulWidget {
 class _FixRequestPageState extends State<FixRequestPage> {
   static const _maxPhotoBytes = 2 * 1024 * 1024;
   final _formKey = GlobalKey<FormState>();
+  final _buildingFieldKey = GlobalKey();
+  final _otherLocationFieldKey = GlobalKey();
+  final _floorFieldKey = GlobalKey<FormFieldState<String>>();
+  final _roomFieldKey = GlobalKey<FormFieldState<String>>();
+  final _locationPickerButtonKey = GlobalKey();
   final _imagePicker = ImagePicker();
   final _floorController = TextEditingController();
   final _roomController = TextEditingController();
   final _otherLocationController = TextEditingController();
   Key _buildingAutocompleteKey = UniqueKey();
+  String _buildingText = '';
   String? _selectedBuilding;
+  String? _buildingError;
+  String? _otherLocationError;
   LatLng? _selectedCoordinates;
   String? _coordinateError;
   bool _isSubmitting = false;
@@ -147,17 +155,29 @@ class _FixRequestPageState extends State<FixRequestPage> {
 
   Future<void> _submitRequest() async {
     if (_isSubmitting) return;
-    final isFormValid = _formKey.currentState!.validate();
+    final isBuildingMissing = _selectedBuilding == null;
+    final isOtherLocation = _selectedBuilding == _otherBuilding;
     setState(() {
+      _buildingError = isBuildingMissing ? 'กรุณาเลือกอาคารจากรายการ' : null;
+      _otherLocationError =
+          isOtherLocation && _otherLocationController.text.trim().isEmpty
+          ? 'กรุณาระบุชื่อตำแหน่ง'
+          : null;
+      _coordinateError = isOtherLocation && _selectedCoordinates == null
+          ? 'กรุณาเลือกตำแหน่งบนแผนที่'
+          : null;
       for (final item in _repairItems) {
         item.photoError = item.photoBytes == null ? 'กรุณาแนบรูปถ่าย' : null;
       }
     });
+    final isFormValid = _formKey.currentState!.validate();
     if (!isFormValid || _repairItems.any((item) => item.photoBytes == null)) {
+      await _scrollToFirstInvalidField();
       return;
     }
     if (_selectedCoordinates == null) {
       setState(() => _coordinateError = 'กรุณาเลือกตำแหน่งบนแผนที่');
+      await _scrollToFirstInvalidField();
       return;
     }
 
@@ -170,7 +190,6 @@ class _FixRequestPageState extends State<FixRequestPage> {
     }
 
     final selectedBuilding = _selectedBuilding!;
-    final isOtherLocation = selectedBuilding == _otherBuilding;
     final building = isOtherLocation
         ? 'other'
         : RegExp(r'\d+').firstMatch(selectedBuilding)!.group(0)!;
@@ -236,6 +255,38 @@ class _FixRequestPageState extends State<FixRequestPage> {
     }
   }
 
+  Future<void> _scrollToFirstInvalidField() async {
+    final invalidFieldContext = _buildingError != null
+        ? _buildingFieldKey.currentContext
+        : _otherLocationError != null
+        ? _otherLocationFieldKey.currentContext
+        : _coordinateError != null
+        ? _locationPickerButtonKey.currentContext
+        : _floorFieldKey.currentState?.hasError == true
+        ? _floorFieldKey.currentContext
+        : _roomFieldKey.currentState?.hasError == true
+        ? _roomFieldKey.currentContext
+        : _firstInvalidRepairItemContext();
+
+    if (invalidFieldContext != null) {
+      await Scrollable.ensureVisible(
+        invalidFieldContext,
+        duration: const Duration(milliseconds: 250),
+        alignment: 0.1,
+      );
+    }
+  }
+
+  BuildContext? _firstInvalidRepairItemContext() {
+    for (final item in _repairItems) {
+      if (item.equipmentFieldKey.currentState?.hasError == true) {
+        return item.equipmentFieldKey.currentContext;
+      }
+      if (item.photoError != null) return item.photoButtonKey.currentContext;
+    }
+    return null;
+  }
+
   void _clearForm() {
     _formKey.currentState?.reset();
     for (final item in _repairItems) {
@@ -248,6 +299,7 @@ class _FixRequestPageState extends State<FixRequestPage> {
       _repairItems
         ..clear()
         ..add(_RepairItem());
+      _buildingText = '';
       _buildingAutocompleteKey = UniqueKey();
       _selectedBuilding = null;
       _selectedCoordinates = null;
@@ -257,203 +309,231 @@ class _FixRequestPageState extends State<FixRequestPage> {
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final validationStyle = theme.textTheme.bodySmall?.copyWith(
+      color: theme.colorScheme.error,
+    );
+
     return Center(
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 720),
-        child: Form(
-          key: _formKey,
-          child: ListView(
-            padding: const EdgeInsets.all(24),
-            children: [
-              Text(
-                'แจ้งซ่อม',
-                style: Theme.of(context).textTheme.headlineSmall,
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'เลือกอาคารและระบุรายละเอียดอุปกรณ์ที่ต้องการแจ้งซ่อม',
-                style: Theme.of(context).textTheme.bodyMedium,
-              ),
-              const SizedBox(height: 24),
-              Autocomplete<String>(
-                key: _buildingAutocompleteKey,
-                optionsBuilder: (textEditingValue) {
-                  final query = textEditingValue.text.trim().toLowerCase();
-                  if (query.isEmpty) return _buildings;
-                  return _buildings.where(
-                    (building) => building.toLowerCase().contains(query),
-                  );
-                },
-                onSelected: (building) {
-                  setState(() {
-                    _selectedBuilding = building;
-                    final buildingNumber = RegExp(
-                      r'\d+',
-                    ).firstMatch(building)?.group(0);
-                    _selectedCoordinates = building == _otherBuilding
-                        ? null
-                        : _buildingCoordinates[buildingNumber];
-                    _coordinateError = null;
-                    if (building != _otherBuilding) {
-                      _otherLocationController.clear();
-                    }
-                  });
-                },
-                fieldViewBuilder:
-                    (context, controller, focusNode, onFieldSubmitted) {
-                      return TextFormField(
-                        controller: controller,
-                        focusNode: focusNode,
-                        decoration: const InputDecoration(
-                          labelText: 'อาคาร',
-                          hintText: 'พิมพ์เพื่อค้นหาอาคาร',
-                          border: OutlineInputBorder(),
-                          suffixIcon: Icon(Icons.arrow_drop_down),
-                        ),
-                        validator: (_) => _selectedBuilding == null
-                            ? 'กรุณาเลือกอาคารจากรายการ'
-                            : null,
-                        onChanged: (_) {
-                          if (_selectedBuilding != null) {
-                            setState(() {
-                              _selectedBuilding = null;
-                              _selectedCoordinates = null;
-                              _coordinateError = null;
-                            });
-                          }
-                        },
-                        onFieldSubmitted: (_) => onFieldSubmitted(),
-                      );
+        child: Theme(
+          data: theme.copyWith(
+            inputDecorationTheme: theme.inputDecorationTheme.copyWith(
+              errorStyle: validationStyle,
+            ),
+          ),
+          child: Form(
+            key: _formKey,
+            child: ListView(
+              padding: const EdgeInsets.all(24),
+              children: [
+                Text(
+                  'แจ้งซ่อม',
+                  style: Theme.of(context).textTheme.headlineSmall,
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'เลือกอาคารและระบุรายละเอียดอุปกรณ์ที่ต้องการแจ้งซ่อม',
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
+                const SizedBox(height: 24),
+                Autocomplete<String>(
+                  key: _buildingAutocompleteKey,
+                  initialValue: TextEditingValue(text: _buildingText),
+                  optionsBuilder: (textEditingValue) {
+                    final query = textEditingValue.text.trim().toLowerCase();
+                    if (query.isEmpty) return _buildings;
+                    return _buildings.where(
+                      (building) => building.toLowerCase().contains(query),
+                    );
+                  },
+                  onSelected: (building) {
+                    setState(() {
+                      _buildingText = building;
+                      _selectedBuilding = building;
+                      _buildingError = null;
+                      _otherLocationError = null;
+                      final buildingNumber = RegExp(
+                        r'\d+',
+                      ).firstMatch(building)?.group(0);
+                      _selectedCoordinates = building == _otherBuilding
+                          ? null
+                          : _buildingCoordinates[buildingNumber];
+                      _coordinateError = null;
+                      if (building != _otherBuilding) {
+                        _otherLocationController.clear();
+                      }
+                    });
+                  },
+                  fieldViewBuilder:
+                      (context, controller, focusNode, onFieldSubmitted) {
+                        return TextFormField(
+                          key: _buildingFieldKey,
+                          controller: controller,
+                          focusNode: focusNode,
+                          decoration: InputDecoration(
+                            labelText: 'อาคาร',
+                            hintText: 'พิมพ์เพื่อค้นหาอาคาร',
+                            border: OutlineInputBorder(),
+                            suffixIcon: Icon(Icons.arrow_drop_down),
+                            errorText: _buildingError,
+                          ),
+                          onChanged: (value) {
+                            _buildingText = value;
+                            if (_selectedBuilding != null) {
+                              setState(() {
+                                _selectedBuilding = null;
+                                _buildingError = 'กรุณาเลือกอาคารจากรายการ';
+                                _selectedCoordinates = null;
+                                _coordinateError = null;
+                              });
+                            }
+                          },
+                          onFieldSubmitted: (_) => onFieldSubmitted(),
+                        );
+                      },
+                ),
+                if (_selectedBuilding != null &&
+                    _selectedBuilding != _otherBuilding)
+                  if (_selectedCoordinates case final coordinates?)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Text(
+                        'Latitude: ${coordinates.latitude.toStringAsFixed(6)}  '
+                        'Longitude: ${coordinates.longitude.toStringAsFixed(6)}',
+                        textAlign: TextAlign.center,
+                      ),
+                    ),
+                if (_selectedBuilding == _otherBuilding) ...[
+                  const SizedBox(height: 16),
+                  TextFormField(
+                    key: _otherLocationFieldKey,
+                    controller: _otherLocationController,
+                    decoration: InputDecoration(
+                      labelText: 'ระบุชื่อตำแหน่ง',
+                      border: OutlineInputBorder(),
+                      errorText: _otherLocationError,
+                    ),
+                    onChanged: (value) {
+                      if (value.trim().isNotEmpty &&
+                          _otherLocationError != null) {
+                        setState(() => _otherLocationError = null);
+                      }
                     },
-              ),
-              if (_selectedBuilding != null &&
-                  _selectedBuilding != _otherBuilding)
-                if (_selectedCoordinates case final coordinates?)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 8),
-                    child: Text(
+                  ),
+                  const SizedBox(height: 12),
+                  OutlinedButton.icon(
+                    key: _locationPickerButtonKey,
+                    onPressed: _chooseLocation,
+                    icon: const Icon(Icons.map_outlined),
+                    label: const Text('เลือกตำแหน่งบนแผนที่'),
+                  ),
+                  if (_selectedCoordinates case final coordinates?)
+                    Text(
                       'Latitude: ${coordinates.latitude.toStringAsFixed(6)}  '
                       'Longitude: ${coordinates.longitude.toStringAsFixed(6)}',
                       textAlign: TextAlign.center,
+                    )
+                  else if (_coordinateError case final error?)
+                    _validationMessage(error)
+                  else
+                    Text(
+                      'ยังไม่ได้เลือกพิกัด',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
                     ),
-                  ),
-              if (_selectedBuilding == _otherBuilding) ...[
+                ],
                 const SizedBox(height: 16),
                 TextFormField(
-                  controller: _otherLocationController,
+                  key: _floorFieldKey,
+                  controller: _floorController,
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [
+                    FilteringTextInputFormatter.digitsOnly,
+                    TextInputFormatter.withFunction((oldValue, newValue) {
+                      if (newValue.text.isEmpty) return newValue;
+                      final floor = int.tryParse(newValue.text);
+                      return floor != null && floor <= 50 ? newValue : oldValue;
+                    }),
+                  ],
                   decoration: const InputDecoration(
-                    labelText: 'ระบุชื่อตำแหน่ง',
+                    labelText: 'ชั้นที่ (ถ้ามี, ไม่เกิน 50 ชั้น)',
                     border: OutlineInputBorder(),
                   ),
-                  validator: _requiredField,
+                  validator: (value) {
+                    final floor = value?.trim() ?? '';
+                    if (floor.isEmpty) return null;
+                    final parsedFloor = int.tryParse(floor);
+                    return parsedFloor != null && parsedFloor <= 50
+                        ? null
+                        : 'ชั้นต้องไม่เกิน 50';
+                  },
                 ),
                 const SizedBox(height: 12),
-                OutlinedButton.icon(
-                  onPressed: _chooseLocation,
-                  icon: const Icon(Icons.map_outlined),
-                  label: const Text('เลือกตำแหน่งบนแผนที่'),
+                TextFormField(
+                  key: _roomFieldKey,
+                  controller: _roomController,
+                  keyboardType: TextInputType.text,
+                  inputFormatters: [
+                    FilteringTextInputFormatter.allow(RegExp('[a-zA-Z0-9-]')),
+                    LengthLimitingTextInputFormatter(8),
+                  ],
+                  decoration: const InputDecoration(
+                    labelText: 'เลขห้อง (ถ้ามี)',
+                    border: OutlineInputBorder(),
+                  ),
+                  validator: (value) {
+                    final room = value?.trim() ?? '';
+                    return room.isEmpty ||
+                            RegExp(r'^[a-zA-Z0-9-]{1,8}$').hasMatch(room)
+                        ? null
+                        : 'เลขห้องต้องเป็นตัวอักษร ตัวเลข หรือ - ไม่เกิน 8 ตัว';
+                  },
                 ),
-                if (_selectedCoordinates case final coordinates?)
-                  Text(
-                    'Latitude: ${coordinates.latitude.toStringAsFixed(6)}  '
-                    'Longitude: ${coordinates.longitude.toStringAsFixed(6)}',
-                    textAlign: TextAlign.center,
-                  )
-                else
-                  Text(
-                    _coordinateError ?? 'ยังไม่ได้เลือกพิกัด',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      color: _coordinateError == null
-                          ? Theme.of(context).colorScheme.onSurfaceVariant
-                          : Theme.of(context).colorScheme.error,
+                const SizedBox(height: 24),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        'รายการอุปกรณ์ที่ชำรุด',
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                    ),
+                    IconButton.filledTonal(
+                      tooltip: 'เพิ่มรายการ',
+                      onPressed: _isSubmitting ? null : _addRepairItem,
+                      icon: const Icon(Icons.add),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                for (var index = 0; index < _repairItems.length; index++) ...[
+                  _buildRepairItemCard(_repairItems[index], index),
+                  if (index < _repairItems.length - 1)
+                    const SizedBox(height: 16),
+                ],
+                const SizedBox(height: 24),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: FilledButton.icon(
+                    onPressed: _isSubmitting ? null : _submitRequest,
+                    icon: _isSubmitting
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.send_outlined),
+                    label: Text(
+                      _isSubmitting ? 'กำลังส่งคำร้อง...' : 'ส่งคำร้อง',
                     ),
                   ),
+                ),
               ],
-              const SizedBox(height: 16),
-              TextFormField(
-                controller: _floorController,
-                keyboardType: TextInputType.number,
-                inputFormatters: [
-                  FilteringTextInputFormatter.digitsOnly,
-                  TextInputFormatter.withFunction((oldValue, newValue) {
-                    if (newValue.text.isEmpty) return newValue;
-                    final floor = int.tryParse(newValue.text);
-                    return floor != null && floor <= 50 ? newValue : oldValue;
-                  }),
-                ],
-                decoration: const InputDecoration(
-                  labelText: 'ชั้นที่ (ถ้ามี, ไม่เกิน 50 ชั้น)',
-                  border: OutlineInputBorder(),
-                ),
-                validator: (value) {
-                  final floor = value?.trim() ?? '';
-                  if (floor.isEmpty) return null;
-                  final parsedFloor = int.tryParse(floor);
-                  return parsedFloor != null && parsedFloor <= 50
-                      ? null
-                      : 'ชั้นต้องไม่เกิน 50';
-                },
-              ),
-              const SizedBox(height: 12),
-              TextFormField(
-                controller: _roomController,
-                keyboardType: TextInputType.text,
-                inputFormatters: [
-                  FilteringTextInputFormatter.allow(RegExp('[a-zA-Z0-9-]')),
-                  LengthLimitingTextInputFormatter(8),
-                ],
-                decoration: const InputDecoration(
-                  labelText: 'เลขห้อง (ถ้ามี)',
-                  border: OutlineInputBorder(),
-                ),
-                validator: (value) {
-                  final room = value?.trim() ?? '';
-                  return room.isEmpty ||
-                          RegExp(r'^[a-zA-Z0-9-]{1,8}$').hasMatch(room)
-                      ? null
-                      : 'เลขห้องต้องเป็นตัวอักษร ตัวเลข หรือ - ไม่เกิน 8 ตัว';
-                },
-              ),
-              const SizedBox(height: 24),
-              Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      'รายการอุปกรณ์ที่ชำรุด',
-                      style: Theme.of(context).textTheme.titleMedium,
-                    ),
-                  ),
-                  IconButton.filledTonal(
-                    tooltip: 'เพิ่มรายการ',
-                    onPressed: _isSubmitting ? null : _addRepairItem,
-                    icon: const Icon(Icons.add),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              for (var index = 0; index < _repairItems.length; index++) ...[
-                _buildRepairItemCard(_repairItems[index], index),
-                if (index < _repairItems.length - 1) const SizedBox(height: 16),
-              ],
-              const SizedBox(height: 24),
-              Align(
-                alignment: Alignment.centerRight,
-                child: FilledButton.icon(
-                  onPressed: _isSubmitting ? null : _submitRequest,
-                  icon: _isSubmitting
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.send_outlined),
-                  label: Text(
-                    _isSubmitting ? 'กำลังส่งคำร้อง...' : 'ส่งคำร้อง',
-                  ),
-                ),
-              ),
-            ],
+            ),
           ),
         ),
       ),
@@ -498,6 +578,7 @@ class _FixRequestPageState extends State<FixRequestPage> {
             ),
             const SizedBox(height: 8),
             TextFormField(
+              key: item.equipmentFieldKey,
               controller: item.equipmentController,
               decoration: const InputDecoration(
                 labelText: 'ชื่ออุปกรณ์ที่พัง',
@@ -507,6 +588,7 @@ class _FixRequestPageState extends State<FixRequestPage> {
             ),
             const SizedBox(height: 12),
             OutlinedButton.icon(
+              key: item.photoButtonKey,
               onPressed: () => _choosePhoto(item),
               icon: const Icon(Icons.add_a_photo_outlined),
               label: Text(
@@ -514,11 +596,7 @@ class _FixRequestPageState extends State<FixRequestPage> {
               ),
             ),
             if (item.photoError case final error?) ...[
-              const SizedBox(height: 4),
-              Text(
-                error,
-                style: TextStyle(color: Theme.of(context).colorScheme.error),
-              ),
+              _validationMessage(error),
             ],
             if (item.photoBytes case final bytes?) ...[
               const SizedBox(height: 8),
@@ -557,6 +635,22 @@ class _FixRequestPageState extends State<FixRequestPage> {
               maxLines: 5,
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget _validationMessage(String message) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsetsDirectional.only(start: 12, top: 4),
+      child: Align(
+        alignment: AlignmentDirectional.centerStart,
+        child: Text(
+          message,
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: theme.colorScheme.error,
+          ),
         ),
       ),
     );
@@ -720,6 +814,8 @@ class _LocationPickerDialogState extends State<_LocationPickerDialog> {
 }
 
 class _RepairItem {
+  final equipmentFieldKey = GlobalKey<FormFieldState<String>>();
+  final photoButtonKey = GlobalKey();
   final equipmentController = TextEditingController();
   final detailsController = TextEditingController();
   String? photoName;

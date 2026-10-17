@@ -1,9 +1,13 @@
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import {
+  createClient,
+  type SupabaseClient,
+} from "https://esm.sh/@supabase/supabase-js@2";
 import {
   createTemporarySession,
   type TemporaryUser,
 } from "../_shared/credentials.ts";
 import { bearerToken, verifyGoogleUser } from "../_shared/google_auth.ts";
+import { ensureProfileAvatarBucket } from "../_shared/profile_avatar_storage.ts";
 import { getSupabaseAdminKey } from "../_shared/supabase_admin_key.ts";
 
 const corsHeaders = {
@@ -48,10 +52,10 @@ function usernameForGoogleUser(email: string, googleUserId: string) {
   return `${prefix}_${suffix}`;
 }
 
-function registrationResponse(
+async function registrationResponse(
   account: {
     google_auth_user_id: string;
-    uid: number;
+    uid: string;
     status: string;
     "Display Name": string;
     role: string;
@@ -60,7 +64,23 @@ function registrationResponse(
   firstName: string,
   lastName: string,
   serviceRoleKey: string,
-) {
+  supabase: SupabaseClient,
+): Promise<Response> {
+  if (!/^u_[0-9]{10}$/.test(account.uid)) {
+    console.error("Registration returned an invalid user UID.");
+    return jsonResponse(500, {
+      error: "Registration could not be completed. Please try again.",
+    });
+  }
+  try {
+    await ensureProfileAvatarBucket(supabase, account.uid);
+  } catch (error) {
+    console.error("Failed to prepare the profile image bucket.", error);
+    return jsonResponse(500, {
+      error: "Your account was created, but profile image storage could not be prepared. Please retry registration.",
+    });
+  }
+
   const user: TemporaryUser = {
     id: account.google_auth_user_id,
     username,
@@ -68,16 +88,15 @@ function registrationResponse(
     lastname: lastName.slice(0, 80),
     role: account.role,
   };
-  return createTemporarySession(user, serviceRoleKey).then((session) =>
-    jsonResponse(201, {
-      ...user,
-      uid: account.uid,
-      status: account.status,
-      displayname: account["Display Name"],
-      hasNationalId: false,
-      ...session,
-    })
-  );
+  const session = await createTemporarySession(user, serviceRoleKey);
+  return jsonResponse(201, {
+    ...user,
+    uid: account.uid,
+    status: account.status,
+    displayname: account["Display Name"],
+    hasNationalId: false,
+    ...session,
+  });
 }
 
 Deno.serve(async (request) => {
@@ -136,6 +155,7 @@ Deno.serve(async (request) => {
       firstName,
       lastName,
       serviceRoleKey,
+      supabase,
     );
   }
 
@@ -176,6 +196,7 @@ Deno.serve(async (request) => {
           firstName,
           lastName,
           serviceRoleKey,
+          supabase,
         );
       }
     }
@@ -193,5 +214,6 @@ Deno.serve(async (request) => {
     firstName,
     lastName,
     serviceRoleKey,
+    supabase,
   );
 });

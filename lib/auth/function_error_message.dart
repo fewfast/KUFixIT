@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 String functionErrorMessage(Object error, String fallback) {
@@ -9,7 +11,14 @@ String functionErrorMessage(Object error, String fallback) {
   }
   if (error is! FunctionsHttpException) return '$fallback: $errorText';
 
-  final details = error.details;
+  var details = error.details;
+  if (details is String) {
+    try {
+      details = jsonDecode(details);
+    } on FormatException {
+      details = null;
+    }
+  }
   if (details is Map && details['error'] is String) {
     return details['error'] as String;
   }

@@ -7,6 +7,7 @@ import 'package:image_picker/image_picker.dart';
 import '../auth/function_error_message.dart';
 import '../auth/temporary_account_session.dart';
 import '../database/connect.dart';
+import 'profile_avatar_image.dart';
 
 class PersonalInfoPage extends StatefulWidget {
   const PersonalInfoPage({super.key, required this.temporaryAccount});
@@ -18,7 +19,7 @@ class PersonalInfoPage extends StatefulWidget {
 }
 
 class _PersonalInfoPageState extends State<PersonalInfoPage> {
-  static const _maxAvatarSizeBytes = 5 * 1024 * 1024;
+  static const _maxAvatarSizeBytes = 2 * 1024 * 1024;
   late final TextEditingController _firstNameController;
   final _formKey = GlobalKey<FormState>();
   final _imagePicker = ImagePicker();
@@ -142,7 +143,7 @@ class _PersonalInfoPageState extends State<PersonalInfoPage> {
                         const SizedBox(height: 8),
                         Text(
                           _isEditing
-                              ? 'แตะรูปเพื่อเปลี่ยนรูปโปรไฟล์ (ไม่เกิน 5 MB)'
+                              ? 'แตะรูปเพื่อเปลี่ยนรูปโปรไฟล์ (ไม่เกิน 2 MB)'
                               : 'รูปโปรไฟล์ปัจจุบัน',
                           textAlign: TextAlign.center,
                         ),
@@ -310,12 +311,17 @@ class _PersonalInfoPageState extends State<PersonalInfoPage> {
 
   Future<void> _chooseAvatar() async {
     try {
-      final image = await _imagePicker.pickImage(source: ImageSource.gallery);
+      final image = await _imagePicker.pickImage(
+        source: ImageSource.gallery,
+        maxWidth: 1024,
+        maxHeight: 1024,
+        imageQuality: 85,
+      );
       if (image == null || !mounted) return;
       final fileSize = await image.length();
       if (fileSize > _maxAvatarSizeBytes) {
         setState(
-          () => _avatarErrorMessage = 'รูปโปรไฟล์ต้องมีขนาดไม่เกิน 5 MB',
+          () => _avatarErrorMessage = 'รูปโปรไฟล์ต้องมีขนาดไม่เกิน 2 MB',
         );
         return;
       }
@@ -333,14 +339,15 @@ class _PersonalInfoPageState extends State<PersonalInfoPage> {
         _isUploadingAvatar = true;
         _avatarErrorMessage = null;
       });
-      final bytes = await image.readAsBytes();
+      final originalBytes = await image.readAsBytes();
+      final bytes = normalizeProfileAvatar(originalBytes);
       if (bytes.length > _maxAvatarSizeBytes) {
-        throw const FormatException('รูปโปรไฟล์ต้องมีขนาดไม่เกิน 5 MB');
+        throw const FormatException('รูปโปรไฟล์ต้องมีขนาดไม่เกิน 2 MB');
       }
       final response = await _callAvatarFunction(
         action: 'upload',
         body: bytes,
-        contentType: mimeType,
+        contentType: 'image/jpeg',
       );
       final data = _responseMap(response.body);
       final url = data['url'];

@@ -9,7 +9,6 @@ import '../auth/temporary_account_session.dart';
 import '../database/connect.dart';
 import 'fixRequest.dart';
 import 'personal_info_page.dart';
-import 'superRegister.dart';
 import 'technicianManager.dart';
 import 'ticketMonitor.dart';
 
@@ -85,8 +84,6 @@ class _LayoutState extends State<Layout> {
                   _signOut(context);
                 } else if (value == 'personal_info') {
                   _showPersonalInfoPage(context, temporaryAccount);
-                } else if (value == 'register') {
-                  _showRegisterPage(context);
                 }
               },
               itemBuilder: (context) => [
@@ -100,11 +97,6 @@ class _LayoutState extends State<Layout> {
                   const PopupMenuItem<String>(
                     value: 'personal_info',
                     child: Text('ข้อมูลส่วนตัว'),
-                  )
-                else if (!temporaryAccount.isSystemAccount)
-                  const PopupMenuItem<String>(
-                    value: 'register',
-                    child: Text('สร้างบัญชีผู้ใช้'),
                   ),
                 const PopupMenuItem<String>(
                   value: 'sign_out',
@@ -186,12 +178,9 @@ class _LayoutState extends State<Layout> {
         children: [
           for (final page in pages)
             if (page.id == 'ticket_monitor' ||
-                ((role == 'User' || role == 'Admin' ||
-                        role == 'SuperAdmin') &&
+                ((role == 'User' || role == 'Admin' || role == 'SuperAdmin') &&
                     page.id == 'dashboard'))
-              TicketMonitor(
-                adminMode: role == 'Admin' || role == 'SuperAdmin',
-              )
+              TicketMonitor(adminMode: role == 'Admin' || role == 'SuperAdmin')
             else if (page.id == 'my_requests')
               const TicketMonitor(myRequests: true)
             else if (page.id == 'new_request')
@@ -234,24 +223,8 @@ class _LayoutState extends State<Layout> {
   Future<void> _showLoginDialog(BuildContext context) {
     return showDialog<void>(
       context: context,
-      builder: (dialogContext) => _LoginDialog(
-        onRegister: () {
-          Navigator.pop(dialogContext);
-          _showRegisterPage(context);
-        },
-      ),
+      builder: (_) => const _LoginDialog(),
     );
-  }
-
-  Future<void> _showRegisterPage(BuildContext context) async {
-    final created = await Navigator.of(
-      context,
-    ).push<bool>(MaterialPageRoute(builder: (_) => const SuperRegisterPage()));
-    if (created == true && context.mounted) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('สร้างบัญชีเรียบร้อยแล้ว')));
-    }
   }
 
   Future<void> _showPersonalInfoPage(
@@ -585,9 +558,7 @@ class _PageContent extends StatelessWidget {
 }
 
 class _LoginDialog extends StatefulWidget {
-  const _LoginDialog({required this.onRegister});
-
-  final VoidCallback onRegister;
+  const _LoginDialog();
 
   @override
   State<_LoginDialog> createState() => _LoginDialogState();
@@ -640,13 +611,6 @@ class _LoginDialogState extends State<_LoginDialog> {
                       child: CircularProgressIndicator(strokeWidth: 2),
                     )
                   : const Text('เข้าสู่ระบบด้วย Google'),
-            ),
-            Align(
-              alignment: Alignment.centerRight,
-              child: TextButton(
-                onPressed: _isSubmitting ? null : widget.onRegister,
-                child: const Text('ยังไม่มีบัญชี? สมัครสมาชิก'),
-              ),
             ),
             const SizedBox(height: 8),
             OutlinedButton.icon(
@@ -725,6 +689,32 @@ class _LoginDialogState extends State<_LoginDialog> {
       if (mounted) Navigator.pop(context);
     } on Exception catch (error) {
       if (!mounted) return;
+      if (_isUnregisteredGoogleAccount(error)) {
+        try {
+          final response = await SupabaseConnection.client.functions.invoke(
+            'register-user',
+            body: const <String, dynamic>{},
+          );
+          TemporaryAccountSession.instance.setFromResponse(response.data);
+          if (!mounted) return;
+          Navigator.pop(context);
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('สมัครสมาชิกและเข้าสู่ระบบเรียบร้อยแล้ว'),
+            ),
+          );
+          return;
+        } on Exception catch (registrationError) {
+          if (!mounted) return;
+          setState(
+            () => _errorMessage = functionErrorMessage(
+              registrationError,
+              'สมัครสมาชิกด้วย Google ไม่สำเร็จ',
+            ),
+          );
+          return;
+        }
+      }
       setState(
         () =>
             _errorMessage = functionErrorMessage(error, 'เข้าสู่ระบบไม่สำเร็จ'),
@@ -733,6 +723,12 @@ class _LoginDialogState extends State<_LoginDialog> {
       _isCompletingSignIn = false;
       if (mounted) setState(() => _isSubmitting = false);
     }
+  }
+
+  bool _isUnregisteredGoogleAccount(Object error) {
+    if (error is! FunctionException || error.status != 404) return false;
+    final details = error.details;
+    return details is Map && details['code'] == 'google_account_not_registered';
   }
 }
 

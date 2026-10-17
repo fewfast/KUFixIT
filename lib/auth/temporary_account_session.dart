@@ -19,7 +19,7 @@ class TemporaryAccount {
 
   final String id;
   final String username;
-  final int? uid;
+  final String? uid;
   final String firstName;
   final String lastName;
   final String? googleDisplayName;
@@ -52,17 +52,22 @@ class TemporaryAccount {
     final expiresAt = data['expiresAt'];
     final uid = switch (rawUid) {
       num value when value.isFinite && value == value.truncateToDouble() =>
-        value.toInt(),
-      String value when RegExp(r'^\d{10}$').hasMatch(value) => int.tryParse(
+        value.toInt().toString(),
+      String value
+          when RegExp(
+            r'^(?:\d{10}|[ut]_(?:\d{10}|[0-9a-f]{32}))$',
+            caseSensitive: false,
+          ).hasMatch(value) =>
         value,
-      ),
       _ => null,
     };
 
     if (id == null ||
         username is! String ||
         (rawUid != null &&
-            (uid == null || uid < 1000000000 || uid > 9999999999)) ||
+            (uid == null ||
+                (RegExp(r'^\d+$').hasMatch(uid) &&
+                    (uid.length != 10 || int.tryParse(uid) == null)))) ||
         firstName is! String ||
         lastName is! String ||
         (googleDisplayName != null && googleDisplayName is! String) ||
@@ -77,7 +82,9 @@ class TemporaryAccount {
     if (isSystemAccount != true &&
         (role == 'User' || role == 'Admin') &&
         uid == null) {
-      throw const FormatException('Temporary session is missing the account UID.');
+      throw const FormatException(
+        'Temporary session is missing the account UID.',
+      );
     }
 
     final expiry = DateTime.fromMillisecondsSinceEpoch(expiresAt * 1000);
@@ -126,9 +133,7 @@ class TemporaryAccountSession extends ChangeNotifier {
     notifyListeners();
   }
 
-  void updateProfile({
-    required String displayName,
-  }) {
+  void updateProfile({required String displayName}) {
     final account = this.account;
     if (account == null) return;
 

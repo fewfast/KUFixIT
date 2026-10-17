@@ -39,6 +39,7 @@ void main() {
     );
 
     expect(find.text('ค้นหา TicketId'), findsOneWidget);
+    expect(find.byTooltip('รีเฟรชรายการ'), findsOneWidget);
     expect(find.text('ยังไม่ได้เชื่อมต่อ Supabase'), findsOneWidget);
 
     await tester.tap(find.byTooltip('เปิดเมนู'));
@@ -69,33 +70,34 @@ void main() {
     expect(find.text('กรุณาเข้าสู่ระบบด้วยบัญชีผู้ดูแลระบบ'), findsOneWidget);
   });
 
-  testWidgets('Admin can open technician management between users and reports', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      const MaterialApp(home: Layout(roleOverride: 'Admin')),
-    );
+  testWidgets(
+    'Admin can open technician management between users and reports',
+    (tester) async {
+      await tester.pumpWidget(
+        const MaterialApp(home: Layout(roleOverride: 'Admin')),
+      );
 
-    await tester.tap(find.byTooltip('เปิดเมนู'));
-    await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('เปิดเมนู'));
+      await tester.pumpAndSettle();
 
-    final menuLabels = tester
-        .widgetList<ListTile>(find.byType(ListTile))
-        .map((tile) => (tile.title! as Text).data)
-        .toList();
-    expect(
-      menuLabels.indexOf('จัดการช่างเทคนิค'),
-      menuLabels.indexOf('จัดการผู้ใช้') + 1,
-    );
-    expect(
-      menuLabels.indexOf('จัดการช่างเทคนิค'),
-      lessThan(menuLabels.indexOf('รายงาน')),
-    );
+      final menuLabels = tester
+          .widgetList<ListTile>(find.byType(ListTile))
+          .map((tile) => (tile.title! as Text).data)
+          .toList();
+      expect(
+        menuLabels.indexOf('จัดการช่างเทคนิค'),
+        menuLabels.indexOf('จัดการผู้ใช้') + 1,
+      );
+      expect(
+        menuLabels.indexOf('จัดการช่างเทคนิค'),
+        lessThan(menuLabels.indexOf('รายงาน')),
+      );
 
-    await tester.tap(find.text('จัดการช่างเทคนิค'));
-    await tester.pumpAndSettle();
-    expect(find.text('จัดการบัญชีและข้อมูลช่างเทคนิค'), findsOneWidget);
-  });
+      await tester.tap(find.text('จัดการช่างเทคนิค'));
+      await tester.pumpAndSettle();
+      expect(find.text('จัดการบัญชีและข้อมูลช่างเทคนิค'), findsOneWidget);
+    },
+  );
 
   testWidgets('User can open their own repair request list', (tester) async {
     await tester.pumpWidget(
@@ -108,6 +110,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('รายการแจ้งซ่อมของฉัน'), findsOneWidget);
+    expect(find.byTooltip('รีเฟรชรายการ'), findsOneWidget);
     expect(
       find.text('กรุณาเข้าสู่ระบบเพื่อดูรายการแจ้งซ่อมของคุณ'),
       findsOneWidget,
@@ -175,7 +178,7 @@ void main() {
     TemporaryAccountSession.instance.setFromResponse({
       'id': '79f01ec0-1234-4321-9321-123456789abc',
       'username': 'test_user',
-      'uid': 1234567890,
+      'uid': 'u_1234567890',
       'firstname': 'Test',
       'lastname': 'User',
       'role': 'User',
@@ -187,7 +190,7 @@ void main() {
     await tester.tap(find.byTooltip('เปิดเมนู'));
     await tester.pumpAndSettle();
 
-    expect(find.text('UID: 1234567890'), findsOneWidget);
+    expect(find.text('UID: u_1234567890'), findsOneWidget);
     expect(find.text('Role: User'), findsOneWidget);
     expect(
       find.text('UID: 79f01ec0-1234-4321-9321-123456789abc'),
@@ -214,27 +217,22 @@ void main() {
     expect(find.text('แจ้งซ่อม'), findsNothing);
   });
 
-  testWidgets('registration page is reachable from the login dialog', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      const MaterialApp(home: Layout(roleOverride: 'Unsign')),
-    );
+  testWidgets(
+    'Google sign-in dialog is the only user registration entry point',
+    (tester) async {
+      await tester.pumpWidget(
+        const MaterialApp(home: Layout(roleOverride: 'Unsign')),
+      );
 
-    await tester.tap(find.byTooltip('เข้าสู่ระบบ'));
-    await tester.pumpAndSettle();
-    expect(find.text('เข้าสู่ระบบด้วย Google'), findsOneWidget);
-    expect(find.text('รหัสผ่าน'), findsNothing);
-    await tester.tap(find.text('ยังไม่มีบัญชี? สมัครสมาชิก'));
-    await tester.pumpAndSettle();
-
-    expect(find.text('สมัครสมาชิก KUFixIT'), findsOneWidget);
-    expect(find.text('สมัครด้วย Google'), findsOneWidget);
-    expect(find.byType(TextFormField), findsNothing);
-    expect(find.text('รหัสผ่าน'), findsNothing);
-    expect(find.text('สร้างบัญชี'), findsNothing);
-    expect(find.byType(DropdownButtonFormField<String>), findsNothing);
-  });
+      await tester.tap(find.byTooltip('เข้าสู่ระบบ'));
+      await tester.pumpAndSettle();
+      expect(find.text('เข้าสู่ระบบด้วย Google'), findsOneWidget);
+      expect(find.text('รหัสผ่าน'), findsNothing);
+      expect(find.text('ยังไม่มีบัญชี? สมัครสมาชิก'), findsNothing);
+      expect(find.text('สมัครสมาชิก KUFixIT'), findsNothing);
+      expect(find.byType(DropdownButtonFormField<String>), findsNothing);
+    },
+  );
 
   testWidgets('staff login form is reachable from the login dialog', (
     tester,
@@ -256,13 +254,13 @@ void main() {
     );
   });
 
-  testWidgets('personal info page shows display name and 10-digit UID', (
+  testWidgets('personal info page shows display name and prefixed UID', (
     tester,
   ) async {
     final account = TemporaryAccount(
       id: '1234567890',
       username: 'test_user',
-      uid: 1234567890,
+      uid: 'u_1234567890',
       firstName: 'Ada',
       lastName: 'Lovelace',
       role: 'User',
@@ -285,7 +283,7 @@ void main() {
     expect(find.text('บทบาท'), findsOneWidget);
     expect(find.text('User'), findsOneWidget);
     expect(find.text('เลขบัญชี'), findsOneWidget);
-    expect(find.text('1234567890'), findsOneWidget);
+    expect(find.text('u_1234567890'), findsOneWidget);
     expect(find.text('แก้ไขข้อมูล'), findsOneWidget);
     expect(find.text('บันทึกข้อมูล'), findsNothing);
     expect(find.text('เลขบัญชี'), findsOneWidget);
@@ -303,7 +301,7 @@ void main() {
     expect(find.text('ยืนยันรหัสผ่านใหม่'), findsNothing);
     expect(find.text('12/80'), findsOneWidget);
     expect(
-      find.text('แตะรูปเพื่อเปลี่ยนรูปโปรไฟล์ (ไม่เกิน 5 MB)'),
+      find.text('แตะรูปเพื่อเปลี่ยนรูปโปรไฟล์ (ไม่เกิน 2 MB)'),
       findsOneWidget,
     );
     expect(find.text('บันทึกข้อมูล'), findsOneWidget);

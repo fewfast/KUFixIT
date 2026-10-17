@@ -112,8 +112,30 @@ Deno.serve(async (request) => {
     serviceRoleKey,
     expiresAt,
   );
+  let uid: string | undefined;
+  if (account.role === "Technician") {
+    const { data: technician, error: technicianError } = await supabase
+      .from("Maintenance_Users")
+      .select("uid")
+      .eq("username", account.username)
+      .maybeSingle();
+    if (technicianError) {
+      console.error("Failed to load technician UID for sign-in.", technicianError);
+      return jsonResponse(500, { error: "Sign-in could not be completed." });
+    }
+    if (
+      !technician ||
+      typeof technician.uid !== "string" ||
+      !/^t_[0-9]{10}$/.test(technician.uid)
+    ) {
+      console.error("Technician account is missing a valid UID.");
+      return jsonResponse(500, { error: "Sign-in could not be completed." });
+    }
+    uid = technician.uid;
+  }
   return jsonResponse(200, {
     ...user,
+    ...(uid ? { uid } : {}),
     hasNationalId: false,
     isSystemAccount: true,
     ...session,

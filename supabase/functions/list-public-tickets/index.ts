@@ -129,7 +129,7 @@ async function requesterUid(
     }
   }
 
-  if (/^\d{10}$/.test(subject)) return subject;
+  if (/^(?:\d{10}|u_\d{10})$/.test(subject)) return subject;
   if (
     !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
       .test(subject)
@@ -154,7 +154,10 @@ async function requesterUid(
     const value = String(uid);
     return /^\d{10}$/.test(value) ? value : null;
   }
-  return typeof uid === "string" && /^\d{10}$/.test(uid) ? uid : null;
+  return typeof uid === "string" &&
+      /^(?:\d{10}|u_\d{10})$/.test(uid)
+    ? uid
+    : null;
 }
 
 async function isAdministrator(

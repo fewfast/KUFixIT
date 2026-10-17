@@ -40,6 +40,59 @@ Staff login sessions expire at the earlier of the normal 8-hour session limit
 or the account's `endtime`. The Edge Function verifies the hash in a protected
 database function and never returns the password hash.
 
+The technician manager uses the `maintenance-teams` Edge Function and the
+`20261016000000_maintenance_teams.sql`,
+`20261016000001_maintenance_users_team_ids.sql`, and
+`20261016000002_maintenance_legacy_time_nullable.sql`,
+`20261016000003_users_prefixed_uids.sql`, and
+`20261016000004_maintenance_technician_uids.sql` migrations. The
+`20261017000000_maintenance_user_profiles_and_date_windows.sql` migration adds
+technician comments and date-based login windows;
+`20261017000001_maintenance_technician_ticket_uid_format.sql` aligns ticket
+table validation with technician UIDs;
+`20261017000002_maintenance_users_flat_technicians.sql` removes obsolete
+time-of-day fields, team grouping, and the technician status flag; and
+`20261017000003_unique_maintenance_technician_display_names.sql` enforces
+unique technician display names. The flat account table uses the unique
+technician UID as its primary key. User UIDs are `u_` followed by 10 random
+digits, assigned by a database trigger with a unique constraint; old ticket
+requester references are updated to preserve their link to existing users.
+Technician UIDs are `t_` followed by 10 random digits. Each technician gets a
+private table
+named after that UID, with ticket assignment, report, result, and a generated
+bucket name field (`result_<TicketId>`). Result-photo object names use the same
+one-based numeric names as repair request photos (`1`, `2`, ...).
+
+Technician accounts remain in the single `Maintenance_Users` table without
+team grouping. Each technician is created with an Admin-provided `teamName`,
+`username`, and required non-empty `comment`; the server generates a unique
+`t_` plus 10-digit UID and a 10-character password. `created_at` is assigned
+by the database. The UID is the technician row's primary key. Technician names
+must be unique regardless of letter case or surrounding whitespace; a database
+unique index enforces this rule for both account creation and name changes.
+Technician login windows are paired `timestamptz[]` values in `start_time` and
+`end_time`. The Admin UI selects inclusive calendar dates in the
+`Asia/Bangkok` timezone; past start dates are rejected. An empty date-window
+array denies technician login until an Admin assigns at least one range.
+Technician account expiry is checked through `Systems_Users.endtime`; there is
+no separate enabled/disabled status column for technicians.
+
+New technician passwords are stored encrypted with AES-GCM in
+`Maintenance_Users`, while `Systems_Users` stores only the bcrypt hash used for
+technician sign-in. The Admin manager can decrypt and view the stored password.
+Configure a separate random encryption secret on Supabase before deploying:
+
+```sh
+npx --yes supabase secrets set MAINTENANCE_CREDENTIALS_KEY="<random secret of at least 32 characters>"
+npx --yes supabase functions deploy maintenance-teams
+```
+
+Keep this key in a password manager and in the ignored local `.env.server`
+backup. It is required to display generated passwords; losing or rotating it
+without re-encrypting the stored credentials makes them unreadable. The
+function verifies the signed temporary session and current database role, and
+allows only `Admin` and `SuperAdmin` accounts.
+
 Create staff accounts only through a trusted administrative SQL session. For
 example, replace the username and password below with the new account values;
 the database stores only the bcrypt hash:
@@ -74,10 +127,10 @@ settings, or the provider credentials have not been configured.
 
 The account row stores `created_at`, `"Display Name"`, `role`, `status`, and
 `google_auth_user_id`. New registrations default to `status = 'active'`;
-existing accounts are backfilled as active. A separate `uid` is generated as
-a unique 10-digit number for each account; Google Auth UUID remains the
-authentication identity. The register and login responses include this `uid`
-and `status`. Existing username/password accounts are not
+existing accounts are backfilled as active. The account `uid` uses the format
+`u_` followed by 10 random digits; Google Auth UUID remains the authentication
+identity. The register and login responses include this `uid` and `status`.
+Existing username/password accounts are not
 linked to Google automatically; remove old rows manually before their users
 register again. Public registration always assigns `User`; elevated roles
 must be granted through a trusted administrative process. Never grant roles
@@ -87,15 +140,23 @@ Migration `20261008000008_sync_google_auth_users.sql` creates `Users` rows
 directly from verified Google Auth users, backfills Google users that already
 exist, removes legacy `Users` triggers that referenced columns absent from the
 current table, and installs a database trigger for future Google registrations.
-Migration `20261008000009_users_unique_ten_digit_uid.sql` adds and backfills the
-unique 10-digit `uid` and generates one for every new account.
+Migration `20261008000009_users_unique_ten_digit_uid.sql` initially added the
+legacy numeric `uid`; migration `20261016000003_users_prefixed_uids.sql`
+converts it to the current prefixed 10-digit format while preserving
+historical ticket requester links.
 Migration `20261008000011_users_status.sql` adds the `status` column, marks
 existing accounts active, and keeps new Google registrations active.
 
-Profile photos are stored in private Storage buckets named for the account
-Google Auth UID. The `profile-avatar` Edge Function creates a bucket on first
-upload, replaces the previous `avatar` image on later uploads, and limits
-images to 5 MB. The app uses a signed URL to display the current image.
+Profile photos are stored in private Storage buckets named with the account UID
+(`u_` followed by 10 digits). Migration
+`20261016000005_profile_avatar_buckets_use_user_uids.sql` converts existing
+user UIDs to the 10-digit format, updates ticket requester references, and
+migrates profile image buckets and objects from Google Auth IDs to account
+UIDs. Registration creates a private bucket named after the new `u_` UID, with
+a 2 MB file-size limit. The `profile-avatar` Edge Function resolves the
+signed-in Google account to its account UID, enforces the same bucket limit,
+replaces the previous `avatar` image on later uploads, and returns a signed
+URL to display the image.
 Google registration, sign-in, and profile updates do not use the
 application-level per-IP rate limit. Migration
 `20261008000007_remove_rate_limit.sql` removes the shared counter table and
@@ -138,6 +199,7 @@ npx --yes supabase functions deploy update-user-profile
 npx --yes supabase functions deploy profile-avatar
 npx --yes supabase functions deploy create-fix-request
 npx --yes supabase functions deploy list-public-tickets
+npx --yes supabase functions deploy maintenance-teams
 ```
 
 Supabase injects its server-side secret API key into Edge Functions as

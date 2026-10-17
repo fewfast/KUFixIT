@@ -213,10 +213,22 @@ class _TicketMonitorState extends State<TicketMonitor> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text(
-            widget.myRequests ? 'รายการแจ้งซ่อมของฉัน' : 'ติดตามงานซ่อม',
-            style: Theme.of(context).textTheme.headlineSmall,
-            textAlign: TextAlign.center,
+          Row(
+            children: [
+              const SizedBox(width: 48),
+              Expanded(
+                child: Text(
+                  widget.myRequests ? 'รายการแจ้งซ่อมของฉัน' : 'ติดตามงานซ่อม',
+                  style: Theme.of(context).textTheme.headlineSmall,
+                  textAlign: TextAlign.center,
+                ),
+              ),
+              IconButton(
+                tooltip: 'รีเฟรชรายการ',
+                onPressed: _isLoading ? null : _loadTickets,
+                icon: const Icon(Icons.refresh),
+              ),
+            ],
           ),
           const SizedBox(height: 12),
           TextField(
