@@ -7,6 +7,9 @@ class TemporaryAccount {
     required this.id,
     required this.username,
     this.uid,
+    this.accessUntil,
+    this.accessRangeStart,
+    this.accessRangeEnd,
     required this.firstName,
     required this.lastName,
     this.googleDisplayName,
@@ -20,6 +23,9 @@ class TemporaryAccount {
   final String id;
   final String username;
   final String? uid;
+  final DateTime? accessUntil;
+  final String? accessRangeStart;
+  final String? accessRangeEnd;
   final String firstName;
   final String lastName;
   final String? googleDisplayName;
@@ -42,6 +48,9 @@ class TemporaryAccount {
     final id = data['id'];
     final username = data['username'];
     final rawUid = data['uid'];
+    final rawAccessUntil = data['accessUntil'];
+    final accessRangeStart = data['accessRangeStart'];
+    final accessRangeEnd = data['accessRangeEnd'];
     final firstName = data['firstname'];
     final lastName = data['lastname'];
     final googleDisplayName = data['displayname'];
@@ -68,6 +77,17 @@ class TemporaryAccount {
             (uid == null ||
                 (RegExp(r'^\d+$').hasMatch(uid) &&
                     (uid.length != 10 || int.tryParse(uid) == null)))) ||
+        (rawAccessUntil != null && rawAccessUntil is! int) ||
+        (accessRangeStart != null &&
+            (accessRangeStart is! String ||
+                DateTime.tryParse(accessRangeStart) == null)) ||
+        (accessRangeEnd != null &&
+            (accessRangeEnd is! String ||
+                DateTime.tryParse(accessRangeEnd) == null)) ||
+        ((accessRangeStart == null) != (accessRangeEnd == null)) ||
+        (accessRangeStart is String &&
+            accessRangeEnd is String &&
+            accessRangeStart.compareTo(accessRangeEnd) > 0) ||
         firstName is! String ||
         lastName is! String ||
         (googleDisplayName != null && googleDisplayName is! String) ||
@@ -96,6 +116,11 @@ class TemporaryAccount {
       id: id.toString(),
       username: username,
       uid: uid,
+      accessUntil: rawAccessUntil is int
+          ? DateTime.fromMillisecondsSinceEpoch(rawAccessUntil * 1000)
+          : null,
+      accessRangeStart: accessRangeStart as String?,
+      accessRangeEnd: accessRangeEnd as String?,
       firstName: firstName,
       lastName: lastName,
       googleDisplayName: googleDisplayName is String ? googleDisplayName : null,
@@ -141,6 +166,9 @@ class TemporaryAccountSession extends ChangeNotifier {
       id: account.id,
       username: account.username,
       uid: account.uid,
+      accessUntil: account.accessUntil,
+      accessRangeStart: account.accessRangeStart,
+      accessRangeEnd: account.accessRangeEnd,
       firstName: displayName,
       lastName: '',
       googleDisplayName: displayName.trim(),

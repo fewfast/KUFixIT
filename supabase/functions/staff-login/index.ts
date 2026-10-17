@@ -12,6 +12,22 @@ const corsHeaders = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
+function bangkokDate(value: string): string | null {
+  const milliseconds = Date.parse(value);
+  if (!Number.isFinite(milliseconds)) return null;
+  return new Date(milliseconds + 7 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
+function dateNumber(value: string): number {
+  const [year, month, day] = value.split("-").map(Number);
+  return Date.UTC(year, month - 1, day) / (24 * 60 * 60 * 1000);
+}
+
+function endOfBangkokDate(value: string): number {
+  const [year, month, day] = value.split("-").map(Number);
+  return Date.UTC(year, month - 1, day + 1) - 7 * 60 * 60 * 1000;
+}
+
 function jsonResponse(status: number, body: Record<string, unknown>) {
   return new Response(JSON.stringify(body), {
     status,
@@ -113,10 +129,13 @@ Deno.serve(async (request) => {
     expiresAt,
   );
   let uid: string | undefined;
+  let accessUntil: number | undefined;
+  let accessRangeStart: string | undefined;
+  let accessRangeEnd: string | undefined;
   if (account.role === "Technician") {
     const { data: technician, error: technicianError } = await supabase
       .from("Maintenance_Users")
-      .select("uid")
+      .select("uid, start_time, end_time")
       .eq("username", account.username)
       .maybeSingle();
     if (technicianError) {
@@ -131,11 +150,77 @@ Deno.serve(async (request) => {
       console.error("Technician account is missing a valid UID.");
       return jsonResponse(500, { error: "Sign-in could not be completed." });
     }
+    if (!Array.isArray(technician.start_time) ||
+      !Array.isArray(technician.end_time) ||
+      technician.start_time.length !== technician.end_time.length) {
+      console.error("Technician account has invalid date ranges.");
+      return jsonResponse(500, { error: "Sign-in could not be completed." });
+    }
+    const today = new Date(Date.now() + 7 * 60 * 60 * 1000)
+      .toISOString()
+      .slice(0, 10);
+    const ranges = technician.start_time.map((start, index) => {
+      const end = technician.end_time[index];
+      if (typeof start !== "string" || typeof end !== "string") return null;
+      const startDate = bangkokDate(start);
+      const endDate = bangkokDate(end);
+      if (!startDate || !endDate || startDate > endDate) return null;
+      return { start: startDate, end: endDate };
+    });
+    if (ranges.some((range) => range === null)) {
+      console.error("Technician account has an invalid date range value.");
+      return jsonResponse(500, { error: "Sign-in could not be completed." });
+    }
+    const activeRanges = ranges.filter(
+      (range) => range !== null && range.start <= today && range.end >= today,
+    );
+    if (activeRanges.length === 0) {
+      console.error("Technician authenticated without an active date range.");
+      return jsonResponse(500, { error: "Sign-in could not be completed." });
+    }
+    let coveredThrough = Math.max(
+      ...activeRanges.map((range) => dateNumber(range.end)),
+    );
+    let coveredFrom = Math.min(
+      ...activeRanges.map((range) => dateNumber(range.start)),
+    );
+    let extended = true;
+    while (extended) {
+      extended = false;
+      for (const range of ranges) {
+        if (
+          range !== null &&
+          dateNumber(range.start) <= coveredThrough + 1 &&
+          dateNumber(range.end) >= coveredFrom - 1 &&
+          (dateNumber(range.start) < coveredFrom ||
+            dateNumber(range.end) > coveredThrough)
+        ) {
+          coveredFrom = Math.min(coveredFrom, dateNumber(range.start));
+          coveredThrough = Math.max(coveredThrough, dateNumber(range.end));
+          extended = true;
+        }
+      }
+    }
+    const coveredStartDate = new Date(coveredFrom * 24 * 60 * 60 * 1000);
+    const coveredEndDate = new Date(
+      coveredThrough * 24 * 60 * 60 * 1000,
+    );
+    accessRangeStart = `${coveredStartDate.getUTCFullYear()}-${String(
+      coveredStartDate.getUTCMonth() + 1,
+    ).padStart(2, "0")}-${String(coveredStartDate.getUTCDate()).padStart(2, "0")}`;
+    const endDate = `${coveredEndDate.getUTCFullYear()}-${String(
+      coveredEndDate.getUTCMonth() + 1,
+    ).padStart(2, "0")}-${String(coveredEndDate.getUTCDate()).padStart(2, "0")}`;
+    accessRangeEnd = endDate;
+    accessUntil = Math.floor(endOfBangkokDate(endDate) / 1000);
     uid = technician.uid;
   }
   return jsonResponse(200, {
     ...user,
     ...(uid ? { uid } : {}),
+    ...(accessUntil ? { accessUntil } : {}),
+    ...(accessRangeStart ? { accessRangeStart } : {}),
+    ...(accessRangeEnd ? { accessRangeEnd } : {}),
     hasNationalId: false,
     isSystemAccount: true,
     ...session,

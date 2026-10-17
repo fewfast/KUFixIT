@@ -10,38 +10,10 @@ import 'package:latlong2/latlong.dart' as latlong;
 
 import '../auth/temporary_account_session.dart';
 import '../database/connect.dart';
+import 'building_locations.dart';
 
 // OpenStreetMap campus centroid: https://www.openstreetmap.org/way/1408248543
 const _campusCenter = LatLng(13.1209646, 100.9192182);
-const _buildingCoordinates = {
-  '1': LatLng(13.120900, 100.919218),
-  '2': LatLng(13.120758, 100.920092),
-  '3': LatLng(13.120429, 100.920714),
-  '4': LatLng(13.120429, 100.920714),
-  '5': LatLng(13.124191, 100.919240),
-  '6': LatLng(13.120879, 100.920656),
-  '7': LatLng(13.117671, 100.921063),
-  '9': LatLng(13.117905, 100.920758),
-  '10': LatLng(13.118544, 100.920377),
-  '11': LatLng(13.124965, 100.919261),
-  '12': LatLng(13.121722, 100.920111),
-  '13': LatLng(13.123324, 100.918349),
-  '14': LatLng(13.121924, 100.919250),
-  '15': LatLng(13.120015, 100.919926),
-  '16': LatLng(13.115229, 100.923787),
-  '17': LatLng(13.119170, 100.919825),
-  '18': LatLng(13.124756, 100.919749),
-  '19': LatLng(13.117848, 100.921621),
-  '20': LatLng(13.122828, 100.918167),
-  '21': LatLng(13.124735, 100.918784),
-  '22': LatLng(13.122748, 100.919202),
-  '23': LatLng(13.119765, 100.920800),
-  '24': LatLng(13.119295, 100.921053),
-  '25': LatLng(13.118747, 100.921069),
-  '26': LatLng(13.118784, 100.921412),
-  '27': LatLng(13.118849, 100.920605),
-  '28': LatLng(13.119372, 100.920327),
-};
 
 class FixRequestPage extends StatefulWidget {
   const FixRequestPage({super.key});
@@ -71,38 +43,6 @@ class _FixRequestPageState extends State<FixRequestPage> {
   String? _coordinateError;
   bool _isSubmitting = false;
   final List<_RepairItem> _repairItems = [_RepairItem()];
-
-  static const _otherBuilding = 'อื่นๆ';
-  static const _buildings = [
-    'อาคาร 1 บริการวิชาการ',
-    'อาคาร 2 ปฏิบัติการวิศวกรรมศาสตร์',
-    'อาคาร 3 ปฏิบัติการวิศวกรรมศาสตร์ภาคเรือและอากาศยาน',
-    'อาคาร 4 พักอาศัยบุคลากร',
-    'อาคาร 5 วิทยาศาสตร์พื้นฐาน',
-    'อาคาร 6 ศูนย์เรียนรวม',
-    'อาคาร 7 โรงอาหารกลาง',
-    'อาคาร 9 ศูนย์กิจกรรม',
-    'อาคาร 10 ศูนย์เรียนรวม 2',
-    'อาคาร 11 สถานที่และยานพาหนะ',
-    'อาคาร 12 ศรีธรรมเกษตร',
-    'อาคาร 13 พลศึกษา',
-    'อาคาร 14 หอสมุดอนุสรณ์ 10 ปี',
-    'อาคาร 15 ปฏิบัติการวิทยาศาสตร์และเทคโนโลยี',
-    'อาคาร 16 รักษาความปลอดภัย',
-    'อาคาร 17 ศูนย์เรียนรวม 3',
-    'อาคาร 18 เศรษฐศาสตร์ศรีราชา',
-    'อาคาร 19 พักอาศัยบุคลากร 2',
-    'อาคาร 20 สระว่ายน้ำ',
-    'อาคาร 21 สนามฟุตบอล',
-    'อาคาร 22 อาคารธุรกิจศึกษา',
-    'อาคาร 23 อาคารคณะวิศวกรรมศาสตร์ศรีราชา',
-    'อาคาร 24 อาคารคณะพาณิชยนาวีนานาชาติ',
-    'อาคาร 25 ศูนย์คอมพิวเตอร์',
-    'อาคาร 26 อาคารคณะวิทยาศาสตร์ ศรีราชา',
-    'อาคาร 27 อาคารเรียนและปฏิบัติการพื้นฐานและเทคโนโลยี',
-    'อาคาร 28 อาคารอเนกประสงค์และการประชุม',
-    _otherBuilding,
-  ];
 
   @override
   void dispose() {
@@ -156,7 +96,7 @@ class _FixRequestPageState extends State<FixRequestPage> {
   Future<void> _submitRequest() async {
     if (_isSubmitting) return;
     final isBuildingMissing = _selectedBuilding == null;
-    final isOtherLocation = _selectedBuilding == _otherBuilding;
+    final isOtherLocation = _selectedBuilding == otherBuildingLabel;
     setState(() {
       _buildingError = isBuildingMissing ? 'กรุณาเลือกอาคารจากรายการ' : null;
       _otherLocationError =
@@ -343,8 +283,8 @@ class _FixRequestPageState extends State<FixRequestPage> {
                   initialValue: TextEditingValue(text: _buildingText),
                   optionsBuilder: (textEditingValue) {
                     final query = textEditingValue.text.trim().toLowerCase();
-                    if (query.isEmpty) return _buildings;
-                    return _buildings.where(
+                    if (query.isEmpty) return buildingOptions;
+                    return buildingOptions.where(
                       (building) => building.toLowerCase().contains(query),
                     );
                   },
@@ -357,13 +297,18 @@ class _FixRequestPageState extends State<FixRequestPage> {
                       final buildingNumber = RegExp(
                         r'\d+',
                       ).firstMatch(building)?.group(0);
-                      _selectedCoordinates = building == _otherBuilding
+                      final coordinates = buildingCoordinates[buildingNumber];
+                      _selectedCoordinates =
+                          building == otherBuildingLabel || coordinates == null
                           ? null
-                          : _buildingCoordinates[buildingNumber];
+                          : LatLng(coordinates.$1, coordinates.$2);
                       _coordinateError = null;
-                      if (building != _otherBuilding) {
+                      if (building != otherBuildingLabel) {
                         _otherLocationController.clear();
                       }
+                    });
+                    WidgetsBinding.instance.addPostFrameCallback((_) {
+                      if (mounted) _floorFieldKey.currentState?.validate();
                     });
                   },
                   fieldViewBuilder:
@@ -395,7 +340,7 @@ class _FixRequestPageState extends State<FixRequestPage> {
                       },
                 ),
                 if (_selectedBuilding != null &&
-                    _selectedBuilding != _otherBuilding)
+                    _selectedBuilding != otherBuildingLabel)
                   if (_selectedCoordinates case final coordinates?)
                     Padding(
                       padding: const EdgeInsets.only(top: 8),
@@ -405,7 +350,7 @@ class _FixRequestPageState extends State<FixRequestPage> {
                         textAlign: TextAlign.center,
                       ),
                     ),
-                if (_selectedBuilding == _otherBuilding) ...[
+                if (_selectedBuilding == otherBuildingLabel) ...[
                   const SizedBox(height: 16),
                   TextFormField(
                     key: _otherLocationFieldKey,
@@ -459,13 +404,22 @@ class _FixRequestPageState extends State<FixRequestPage> {
                       return floor != null && floor <= 50 ? newValue : oldValue;
                     }),
                   ],
-                  decoration: const InputDecoration(
-                    labelText: 'ชั้นที่ (ถ้ามี, ไม่เกิน 50 ชั้น)',
+                  decoration: InputDecoration(
+                    labelText:
+                        _selectedBuilding != null &&
+                            _selectedBuilding != otherBuildingLabel
+                        ? 'ชั้นที่ (จำเป็น, ไม่เกิน 50 ชั้น)'
+                        : 'ชั้นที่ (ถ้ามี, ไม่เกิน 50 ชั้น)',
                     border: OutlineInputBorder(),
                   ),
                   validator: (value) {
                     final floor = value?.trim() ?? '';
-                    if (floor.isEmpty) return null;
+                    if (floor.isEmpty) {
+                      return _selectedBuilding != null &&
+                              _selectedBuilding != otherBuildingLabel
+                          ? 'กรุณาระบุชั้นที่'
+                          : null;
+                    }
                     final parsedFloor = int.tryParse(floor);
                     return parsedFloor != null && parsedFloor <= 50
                         ? null

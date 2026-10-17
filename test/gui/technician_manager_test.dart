@@ -27,15 +27,47 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('ชื่อช่าง'), findsOneWidget);
-    expect(find.text('username ช่าง'), findsOneWidget);
-    expect(find.text('ข้อมูลช่าง *'), findsOneWidget);
-    expect(find.text('จำเป็นต้องกรอก'), findsOneWidget);
+    expect(find.text('ชื่อทีมช่าง'), findsOneWidget);
+    expect(find.text('username'), findsOneWidget);
+    expect(find.text('ข้อมูลช่าง'), findsOneWidget);
+    expect(find.text('จำเป็นต้องกรอก'), findsNWidgets(2));
     expect(find.text('สร้างบัญชีช่าง'), findsOneWidget);
-    expect(find.text('เลือกทีมช่าง'), findsNothing);
+    expect(find.text('เลือกทีมช่าง'), findsOneWidget);
+    expect(find.text('รายการงานตามทีมช่าง'), findsOneWidget);
+    expect(
+      tester
+          .widget<DropdownMenu<String>>(find.byType(DropdownMenu<String>))
+          .enableFilter,
+      isTrue,
+    );
     expect(find.text('สถานะ'), findsNothing);
-    await tester.enterText(find.byType(TextField).at(0), 'ช่างทดสอบ');
-    await tester.enterText(find.byType(TextField).at(1), 'test_tech');
+    expect(
+      tester
+          .widget<TextField>(
+            find.byWidgetPredicate(
+              (widget) =>
+                  widget is TextField &&
+                  widget.decoration?.labelText == 'username',
+            ),
+          )
+          .maxLength,
+      10,
+    );
+    await tester.enterText(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is TextField &&
+            widget.decoration?.labelText == 'ชื่อทีมช่าง',
+      ),
+      'ช่างทดสอบ',
+    );
+    await tester.enterText(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is TextField && widget.decoration?.labelText == 'username',
+      ),
+      'test_tech',
+    );
     await tester.ensureVisible(find.text('สร้างบัญชีช่าง'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('สร้างบัญชีช่าง'));

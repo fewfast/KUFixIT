@@ -260,6 +260,246 @@ Deno.serve(async (request) => {
       return jsonResponse(200, { technicians });
     }
 
+    if (action === "list-technician-tickets") {
+      const uid = payload.uid;
+      if (!validateTechnicianUid(uid)) {
+        return jsonResponse(400, { error: "กรุณาตรวจสอบ UID ของบัญชีช่าง" });
+      }
+
+      const ticketIds: string[] = [];
+      for (let offset = 0; ; offset += 500) {
+        const { data: assignments, error: assignmentsError } = await supabase
+          .from(uid)
+          .select("ticketId")
+          .order("ticketId", { ascending: false })
+          .range(offset, offset + 499);
+        if (assignmentsError) throw assignmentsError;
+        const page = assignments ?? [];
+        for (const assignment of page) {
+          if (
+            typeof assignment.ticketId !== "string" ||
+            !/^\d{10}$/.test(assignment.ticketId)
+          ) {
+            throw new Error(`Invalid ticket ID in technician table ${uid}.`);
+          }
+          ticketIds.push(assignment.ticketId);
+        }
+        if (page.length < 500) break;
+      }
+      if (ticketIds.length === 0) return jsonResponse(200, { tickets: [] });
+
+      const ticketsById = new Map<string, Record<string, unknown>>();
+      for (let offset = 0; offset < ticketIds.length; offset += 100) {
+        const batch = ticketIds.slice(offset, offset + 100);
+        const { data: tickets, error: ticketsError } = await supabase
+          .from("FixList")
+          .select("TicketId, building, area, floor, room, longtitude, latitude")
+          .in("TicketId", batch);
+        if (ticketsError) throw ticketsError;
+        for (const ticket of tickets ?? []) {
+          ticketsById.set(ticket.TicketId, ticket);
+        }
+      }
+      const missingTicketIds = ticketIds.filter((ticketId) =>
+        !ticketsById.has(ticketId)
+      );
+      if (missingTicketIds.length > 0) {
+        throw new Error(
+          `Assigned tickets are missing from FixList: ${missingTicketIds.join(", ")}.`,
+        );
+      }
+      const tickets: Record<string, unknown>[] = [];
+      for (let offset = 0; offset < ticketIds.length; offset += 20) {
+        const batch = ticketIds.slice(offset, offset + 20);
+        const batchTickets = await Promise.all(
+          batch.map(async (ticketId) => {
+            const { data: devices, error: deviceError } = await supabase
+              .from(ticketId)
+              .select("deviceid, device, discription")
+              .order("deviceid", { ascending: true })
+              .limit(100);
+            if (deviceError) {
+              console.error(
+                `Failed to load devices for ticket ${ticketId}.`,
+                deviceError,
+              );
+              throw new Error(
+                `Devices for ticket ${ticketId} could not be loaded.`,
+              );
+            }
+            const { data: photos, error: photosError } = await supabase.storage
+              .from(ticketId)
+              .list("", { limit: 100 });
+            if (photosError) {
+              console.error(
+                `Failed to list device photos for ticket ${ticketId}.`,
+                photosError,
+              );
+              throw new Error(
+                `Device photos for ticket ${ticketId} could not be loaded.`,
+              );
+            }
+            const photoNames = new Set(
+              (photos ?? []).map((photo) => photo.name),
+            );
+            const ticketDevices = await Promise.all(
+              (devices ?? []).map(async (device) => {
+                const photoName = String(device.deviceid);
+                if (!photoNames.has(photoName)) {
+                  return { ...device, devicePhotoUrl: null };
+                }
+                const { data: photo, error: photoError } = await supabase.storage
+                  .from(ticketId)
+                  .createSignedUrl(photoName, 3600);
+                if (photoError) {
+                  console.error(
+                    `Failed to create a signed URL for device ${photoName} of ticket ${ticketId}.`,
+                    photoError,
+                  );
+                  throw new Error(
+                    `Device photo ${photoName} for ticket ${ticketId} could not be loaded.`,
+                  );
+                }
+                return { ...device, devicePhotoUrl: photo.signedUrl };
+              }),
+            );
+            return {
+              ...ticketsById.get(ticketId)!,
+              devices: ticketDevices,
+            };
+          }),
+        );
+        tickets.push(...batchTickets);
+      }
+      return jsonResponse(200, {
+        tickets,
+      });
+    }
+
+    if (action === "update-assigned-ticket") {
+      const uid = payload.uid;
+      const ticketId = payload.ticketId;
+      const request = payload.request;
+      if (!validateTechnicianUid(uid) || typeof ticketId !== "string" ||
+        !/^\d{10}$/.test(ticketId) || !isRecord(request)) {
+        return jsonResponse(400, { error: "ข้อมูล ticket ไม่ถูกต้อง" });
+      }
+      const { data: assignment, error: assignmentError } = await supabase
+        .from(uid)
+        .select("ticketId")
+        .eq("ticketId", ticketId)
+        .maybeSingle();
+      if (assignmentError) throw assignmentError;
+      if (!assignment) {
+        return jsonResponse(404, { error: "ไม่พบ ticket นี้ในรายการงานของทีมช่าง" });
+      }
+
+      const building = request.building;
+      const area = request.area;
+      const floor = request.floor;
+      const room = request.room;
+      const latitude = request.latitude;
+      const longitude = request.longitude;
+      const validRequest =
+        typeof building === "string" &&
+        (building === "other" || /^\d{1,2}$/.test(building)) &&
+        (building === "other"
+          ? typeof area === "string" && area.trim().length > 0 &&
+            area.trim().length <= 120
+          : area == null || area === "") &&
+        (floor == null || (typeof floor === "string" &&
+          (floor === "" || (/^\d{1,2}$/.test(floor) && Number(floor) <= 50)))) &&
+        (room == null || (typeof room === "string" &&
+          (room === "" || /^[a-zA-Z0-9-]{1,8}$/.test(room)))) &&
+        typeof latitude === "number" && Number.isFinite(latitude) &&
+        latitude >= -90 && latitude <= 90 &&
+        typeof longitude === "number" && Number.isFinite(longitude) &&
+        longitude >= -180 && longitude <= 180;
+      if (!validRequest) {
+        return jsonResponse(400, { error: "กรุณาตรวจสอบข้อมูลอาคาร ห้อง และพิกัด" });
+      }
+
+      const { data: updatedTicket, error: updateError } = await supabase
+        .from("FixList")
+        .update({
+          building,
+          area: building === "other" ? (area as string).trim() : null,
+          floor: typeof floor === "string" && floor.trim() ? floor.trim() : null,
+          room: typeof room === "string" && room.trim() ? room.trim() : null,
+          latitude,
+          longtitude: longitude,
+        })
+        .eq("TicketId", ticketId)
+        .select("TicketId")
+        .maybeSingle();
+      if (updateError) throw updateError;
+      if (!updatedTicket) {
+        return jsonResponse(404, { error: "ไม่พบ ticket ใน FixList" });
+      }
+      return jsonResponse(200, { updated: true });
+    }
+
+    if (action === "update-assigned-device") {
+      const uid = payload.uid;
+      const ticketId = payload.ticketId;
+      const deviceId = payload.deviceId;
+      const request = payload.request;
+      if (!validateTechnicianUid(uid) || typeof ticketId !== "string" ||
+        !/^\d{10}$/.test(ticketId) || typeof deviceId !== "number" ||
+        !Number.isInteger(deviceId) || deviceId < 1 || !isRecord(request)) {
+        return jsonResponse(400, { error: "ข้อมูลอุปกรณ์ไม่ถูกต้อง" });
+      }
+      const { data: assignment, error: assignmentError } = await supabase
+        .from(uid)
+        .select("ticketId")
+        .eq("ticketId", ticketId)
+        .maybeSingle();
+      if (assignmentError) throw assignmentError;
+      if (!assignment) {
+        return jsonResponse(404, { error: "ไม่พบ ticket นี้ในรายการงานของทีมช่าง" });
+      }
+
+      const device = request.device;
+      const description = request.description;
+      if (typeof device !== "string" || device.length > 500 ||
+        typeof description !== "string" || description.length > 5000) {
+        return jsonResponse(400, { error: "กรุณาตรวจสอบชื่ออุปกรณ์และคำอธิบาย" });
+      }
+      const { data: updatedDevice, error: updateError } = await supabase
+        .from(ticketId)
+        .update({
+          device: device.trim() || null,
+          discription: description.trim() || null,
+        })
+        .eq("deviceid", deviceId)
+        .select("deviceid")
+        .maybeSingle();
+      if (updateError) throw updateError;
+      if (!updatedDevice) {
+        return jsonResponse(404, { error: "ไม่พบรายการอุปกรณ์ของ ticket นี้" });
+      }
+      return jsonResponse(200, { updated: true });
+    }
+
+    if (action === "remove-assigned-ticket") {
+      const uid = payload.uid;
+      const ticketId = payload.ticketId;
+      if (!validateTechnicianUid(uid) || typeof ticketId !== "string" ||
+        !/^\d{10}$/.test(ticketId)) {
+        return jsonResponse(400, { error: "ข้อมูล ticket ไม่ถูกต้อง" });
+      }
+      const { data: removedAssignments, error: removeError } = await supabase
+        .from(uid)
+        .delete()
+        .eq("ticketId", ticketId)
+        .select("ticketId");
+      if (removeError) throw removeError;
+      if (!removedAssignments || removedAssignments.length !== 1) {
+        return jsonResponse(404, { error: "ไม่พบ ticket นี้ในรายการงานของทีมช่าง" });
+      }
+      return jsonResponse(200, { removed: true });
+    }
+
     if (action === "create-technician") {
       const teamName = typeof payload.teamName === "string"
         ? payload.teamName.trim()
@@ -273,8 +513,8 @@ Deno.serve(async (request) => {
       if (!teamName || teamName.length > 100) {
         return jsonResponse(400, { error: "กรุณากรอกชื่อช่างไม่เกิน 100 ตัวอักษร" });
       }
-      if (!/^[A-Za-z0-9_]{3,64}$/.test(username)) {
-        return jsonResponse(400, { error: "username ต้องมี 3-64 ตัวอักษร และใช้ได้เฉพาะ A-Z, a-z, 0-9 หรือ _" });
+      if (!/^[A-Za-z0-9_]{3,10}$/.test(username)) {
+        return jsonResponse(400, { error: "username ต้องมี 3-10 ตัวอักษร และใช้ได้เฉพาะ A-Z, a-z, 0-9 หรือ _" });
       }
       if (!comment) {
         return jsonResponse(400, { error: "กรุณากรอกข้อมูลช่าง" });
@@ -318,6 +558,25 @@ Deno.serve(async (request) => {
       }
 
       const update: Record<string, unknown> = {};
+      const hasUsernameUpdate = "username" in payload;
+      if (hasUsernameUpdate) {
+        const username = typeof payload.username === "string"
+          ? payload.username.trim()
+          : "";
+        if (!/^[A-Za-z0-9_]{3,10}$/.test(username)) {
+          return jsonResponse(400, {
+            error: "username ต้องมี 3-10 ตัวอักษร และใช้ได้เฉพาะ A-Z, a-z, 0-9 หรือ _",
+          });
+        }
+        const { data, error } = await supabase.rpc(
+          "update_maintenance_technician_username",
+          { p_technician_uid: uid, p_username: username },
+        );
+        if (error) throw error;
+        if (data !== true) {
+          return jsonResponse(404, { error: "ไม่พบบัญชีช่างที่ต้องการแก้ไข" });
+        }
+      }
       if ("teamName" in payload) {
         const teamName = typeof payload.teamName === "string"
           ? payload.teamName.trim()
@@ -327,6 +586,18 @@ Deno.serve(async (request) => {
         }
         update.teamName = teamName;
       }
+      if ("comment" in payload) {
+        const comment = typeof payload.comment === "string"
+          ? payload.comment.trim()
+          : "";
+        if (!comment) {
+          return jsonResponse(400, { error: "กรุณากรอกข้อมูลช่าง" });
+        }
+        if (comment.length > 1000) {
+          return jsonResponse(400, { error: "ข้อมูลช่างต้องไม่เกิน 1,000 ตัวอักษร" });
+        }
+        update.comment = comment;
+      }
       if ("dateRanges" in payload) {
         const dateRanges = validateDateRanges(payload.dateRanges);
         if (!dateRanges) {
@@ -335,8 +606,11 @@ Deno.serve(async (request) => {
         update.start_time = dateRanges.starts;
         update.end_time = dateRanges.ends;
       }
-      if (Object.keys(update).length === 0) {
+      if (Object.keys(update).length === 0 && !hasUsernameUpdate) {
         return jsonResponse(400, { error: "ไม่มีข้อมูลที่ต้องการแก้ไข" });
+      }
+      if (Object.keys(update).length === 0) {
+        return jsonResponse(200, { success: true });
       }
       const { data, error } = await supabase
         .from("Maintenance_Users")
@@ -347,6 +621,22 @@ Deno.serve(async (request) => {
       if (error) throw error;
       if (!data) return jsonResponse(404, { error: "ไม่พบบัญชีช่างที่ต้องการแก้ไข" });
       return jsonResponse(200, { success: true });
+    }
+
+    if (action === "delete-technician") {
+      const uid = payload.uid;
+      if (!validateTechnicianUid(uid)) {
+        return jsonResponse(400, { error: "กรุณาตรวจสอบ UID ของบัญชีช่าง" });
+      }
+      const { data, error } = await supabase.rpc(
+        "delete_maintenance_technician",
+        { p_technician_uid: uid },
+      );
+      if (error) throw error;
+      if (data !== true) {
+        return jsonResponse(404, { error: "ไม่พบบัญชีช่างที่ต้องการลบ" });
+      }
+      return jsonResponse(200, { deleted: true });
     }
 
     return jsonResponse(400, { error: "ไม่รู้จักคำสั่งจัดการช่างนี้" });

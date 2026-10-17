@@ -57,18 +57,10 @@ begin
 
   execute pg_catalog.format(
     'create table if not exists public.%I (
-      ticket_id text primary key
-        references public."FixList" ("TicketId") on delete cascade,
-      assigned_at timestamptz not null default pg_catalog.now(),
-      status text not null default %L,
-      "ticketId" text generated always as (ticket_id) stored,
-      report text,
-      result boolean not null default false,
-      bucket text generated always as (%L || ticket_id) stored
+      "ticketId" text primary key
+        references public."FixList" ("TicketId") on delete cascade
     )',
-    p_uid,
-    'assigned',
-    'result_'
+    p_uid
   );
   execute pg_catalog.format(
     'alter table public.%I enable row level security',

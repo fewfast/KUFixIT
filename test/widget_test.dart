@@ -21,16 +21,62 @@ void main() {
     );
 
     expect(find.text('KUFixIT'), findsOneWidget);
+    expect(find.text('รายการงานซ่อมที่ได้รับมอบหมาย'), findsOneWidget);
     await tester.tap(find.byTooltip('เปิดเมนู'));
     await tester.pumpAndSettle();
-    expect(find.text('งานที่ได้รับ'), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byType(Drawer),
+        matching: find.text('งานที่ได้รับ'),
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('หน้าหลัก'), findsNothing);
 
-    await tester.tap(find.text('งานที่ได้รับ'));
+    await tester.tap(find.widgetWithText(ListTile, 'งานที่ได้รับ'));
     await tester.pumpAndSettle();
 
     expect(find.text('KUFixIT'), findsOneWidget);
     expect(find.text('รายการงานซ่อมที่ได้รับมอบหมาย'), findsOneWidget);
     expect(find.text('รายการแจ้งซ่อมของฉัน'), findsNothing);
+  });
+
+  testWidgets('Technician drawer shows username, UID, and role', (
+    tester,
+  ) async {
+    TemporaryAccountSession.instance.setFromResponse({
+      'id': 'testTicket',
+      'username': 'testTicket',
+      'uid': 't_1234567890',
+      'accessUntil':
+          DateTime.now()
+              .add(const Duration(hours: 25))
+              .millisecondsSinceEpoch ~/
+          1000,
+      'accessRangeStart': '2026-10-17',
+      'accessRangeEnd': '2026-10-18',
+      'firstname': 'testTicket',
+      'lastname': '',
+      'role': 'Technician',
+      'isSystemAccount': true,
+      'accessToken': 'signed-token',
+      'expiresAt':
+          DateTime.now().add(const Duration(hours: 1)).millisecondsSinceEpoch ~/
+          1000,
+    });
+
+    await tester.pumpWidget(const MaterialApp(home: Layout()));
+    await tester.tap(find.byTooltip('เปิดเมนู'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('username: testTicket'), findsOneWidget);
+    expect(find.text('UID: t_1234567890'), findsOneWidget);
+    expect(find.text('Role: Technician'), findsOneWidget);
+    expect(find.text('ช่วงเวลางาน: 17/10/2569 - 18/10/2569'), findsOneWidget);
+    expect(find.text('อายุบัญชีที่เหลือ: 1 วัน 1 ชม.'), findsOneWidget);
+    expect(find.text('บัญชี: testTicket'), findsNothing);
+
+    TemporaryAccountSession.instance.clear();
   });
 
   testWidgets('User role gets request navigation', (tester) async {
@@ -68,6 +114,49 @@ void main() {
     expect(find.text('ติดตามงานซ่อม'), findsOneWidget);
     expect(find.text('ค้นหา TicketId'), findsOneWidget);
     expect(find.text('กรุณาเข้าสู่ระบบด้วยบัญชีผู้ดูแลระบบ'), findsOneWidget);
+  });
+
+  testWidgets('SuperAdmin drawer omits restricted navigation items', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      const MaterialApp(home: Layout(roleOverride: 'SuperAdmin')),
+    );
+
+    await tester.tap(find.byTooltip('เปิดเมนู'));
+    await tester.pumpAndSettle();
+
+    final drawer = find.byType(Drawer);
+    for (final label in ['หน้าหลัก', 'จัดการช่างเทคนิค', 'ตั้งค่าระบบ']) {
+      expect(
+        find.descendant(of: drawer, matching: find.text(label)),
+        findsNothing,
+      );
+    }
+    for (final label in [
+      'คำร้องแจ้งซ่อม',
+      'จัดการผู้ใช้',
+      'ยืนยันการกระทำ',
+      'รายงาน',
+    ]) {
+      expect(
+        find.descendant(of: drawer, matching: find.text(label)),
+        findsOneWidget,
+      );
+    }
+
+    final menuLabels = tester
+        .widgetList<ListTile>(
+          find.descendant(of: drawer, matching: find.byType(ListTile)),
+        )
+        .map((tile) => (tile.title! as Text).data)
+        .toList();
+    expect(menuLabels, [
+      'คำร้องแจ้งซ่อม',
+      'จัดการผู้ใช้',
+      'ยืนยันการกระทำ',
+      'รายงาน',
+    ]);
   });
 
   testWidgets(

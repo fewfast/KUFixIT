@@ -46,11 +46,20 @@ void main() {
       'role': 'Technician',
       'accessToken': 'signed-token',
       'expiresAt': expiresAt,
+      'accessUntil': expiresAt + 86400,
+      'accessRangeStart': '2026-10-17',
+      'accessRangeEnd': '2026-10-18',
     });
 
     expect(session.account?.isSystemAccount, isTrue);
     expect(session.account?.id, 'technician1');
     expect(session.account?.role, 'Technician');
+    expect(
+      session.account?.accessUntil,
+      DateTime.fromMillisecondsSinceEpoch((expiresAt + 86400) * 1000),
+    );
+    expect(session.account?.accessRangeStart, '2026-10-17');
+    expect(session.account?.accessRangeEnd, '2026-10-18');
   });
 
   test('accepts prefixed technician UIDs and legacy numeric UIDs', () {

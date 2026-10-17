@@ -129,11 +129,34 @@ class _LayoutState extends State<Layout> {
                     ),
                     if (temporaryAccount != null) ...[
                       const SizedBox(height: 8),
-                      Text(
-                        temporaryAccount.isSystemAccount
-                            ? 'บัญชี: ${temporaryAccount.username}'
-                            : 'UID: ${temporaryAccount.uid ?? '-'}',
-                      ),
+                      if (role == 'Technician') ...[
+                        Text('username: ${temporaryAccount.username}'),
+                        Text('UID: ${temporaryAccount.uid ?? '-'}'),
+                        Text('Role: $role'),
+                        if (temporaryAccount.accessRangeStart != null &&
+                            temporaryAccount.accessRangeEnd != null)
+                          SingleChildScrollView(
+                            scrollDirection: Axis.horizontal,
+                            child: Text(
+                              'ช่วงเวลางาน: '
+                              '${_formatBuddhistDate(temporaryAccount.accessRangeStart!)}'
+                              ' - '
+                              '${_formatBuddhistDate(temporaryAccount.accessRangeEnd!)}',
+                              maxLines: 1,
+                              softWrap: false,
+                            ),
+                          ),
+                        _SessionTimeRemaining(
+                          expiresAt:
+                              temporaryAccount.accessUntil ??
+                              temporaryAccount.expiresAt,
+                        ),
+                      ] else
+                        Text(
+                          temporaryAccount.isSystemAccount
+                              ? 'บัญชี: ${temporaryAccount.username}'
+                              : 'UID: ${temporaryAccount.uid ?? '-'}',
+                        ),
                     ],
                     if (role == 'User' || role == 'Admin') ...[
                       const SizedBox(height: 4),
@@ -402,6 +425,58 @@ class _ProfileAvatarState extends State<_ProfileAvatar> {
   }
 }
 
+String _formatBuddhistDate(String isoDate) {
+  final date = DateTime.parse(isoDate);
+  return '${date.day.toString().padLeft(2, '0')}/'
+      '${date.month.toString().padLeft(2, '0')}/${date.year + 543}';
+}
+
+class _SessionTimeRemaining extends StatefulWidget {
+  const _SessionTimeRemaining({required this.expiresAt});
+
+  final DateTime expiresAt;
+
+  @override
+  State<_SessionTimeRemaining> createState() => _SessionTimeRemainingState();
+}
+
+class _SessionTimeRemainingState extends State<_SessionTimeRemaining> {
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer.periodic(const Duration(minutes: 1), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final remaining = widget.expiresAt.difference(DateTime.now());
+    if (remaining <= Duration.zero) {
+      return const Text('เวลาใช้งานคงเหลือ: หมดอายุแล้ว');
+    }
+    final totalMinutes =
+        remaining.inMinutes + (remaining.inSeconds % 60 == 0 ? 0 : 1);
+    final days = totalMinutes ~/ (24 * 60);
+    final hours = (totalMinutes % (24 * 60)) ~/ 60;
+    final minutes = totalMinutes % 60;
+    final durationText = [
+      if (days > 0) '$days วัน',
+      if (hours > 0) '$hours ชม.',
+      if (minutes > 0 || (days == 0 && hours == 0)) '$minutes นาที',
+    ].join(' ');
+    return Text('อายุบัญชีที่เหลือ: $durationText');
+  }
+}
+
 class _PageInfo {
   const _PageInfo(this.id, this.label, this.icon, this.description);
 
@@ -421,7 +496,6 @@ List<_PageInfo> _pagesFor(String role) {
 
   return switch (role) {
     'Technician' => [
-      dashboard,
       const _PageInfo(
         'assigned',
         'งานที่ได้รับ',
@@ -463,7 +537,6 @@ List<_PageInfo> _pagesFor(String role) {
       ),
     ],
     'SuperAdmin' => [
-      dashboard,
       const _PageInfo(
         'requests',
         'คำร้องแจ้งซ่อม',
@@ -477,22 +550,16 @@ List<_PageInfo> _pagesFor(String role) {
         'จัดการบัญชีและบทบาทผู้ใช้',
       ),
       const _PageInfo(
-        'technician_manager',
-        'จัดการช่างเทคนิค',
-        Icons.engineering_outlined,
-        'จัดการบัญชีและข้อมูลช่างเทคนิค',
+        'action_confirmation',
+        'ยืนยันการกระทำ',
+        Icons.fact_check_outlined,
+        'ตรวจสอบและยืนยันการกระทำ',
       ),
       const _PageInfo(
         'reports',
         'รายงาน',
         Icons.assessment_outlined,
         'รายงานภาพรวมการแจ้งซ่อม',
-      ),
-      const _PageInfo(
-        'settings',
-        'ตั้งค่าระบบ',
-        Icons.settings_outlined,
-        'ตั้งค่าระบบ KUFixIT',
       ),
     ],
     'Unsign' => [

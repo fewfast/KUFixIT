@@ -71,18 +71,26 @@ void main() {
 
     expect(find.text('กรุณาระบุชื่อตำแหน่ง'), findsOneWidget);
     expect(find.text('กรุณาเลือกตำแหน่งบนแผนที่'), findsOneWidget);
+    expect(find.text('กรุณาระบุชั้นที่'), findsNothing);
   });
 
   testWidgets(
-    'floor is capped at 50 and room accepts letters, digits, and hyphens',
+    'requires floor for a selected building but keeps room optional',
     (tester) async {
       await tester.pumpWidget(
         const MaterialApp(home: Scaffold(body: FixRequestPage())),
       );
 
+      final buildingField = find.byType(TextFormField).first;
+      await tester.tap(buildingField);
+      await tester.enterText(buildingField, 'อาคาร 1');
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('อาคาร 1 บริการวิชาการ'));
+      await tester.pumpAndSettle();
+
       final floorField = find.widgetWithText(
         TextFormField,
-        'ชั้นที่ (ถ้ามี, ไม่เกิน 50 ชั้น)',
+        'ชั้นที่ (จำเป็น, ไม่เกิน 50 ชั้น)',
       );
       final roomField = find.widgetWithText(TextFormField, 'เลขห้อง (ถ้ามี)');
 
@@ -104,6 +112,8 @@ void main() {
         tester.widget<TextFormField>(roomField).controller!.text,
         'ROOM1234',
       );
+      await tester.enterText(floorField, '');
+      await tester.enterText(roomField, '');
 
       await tester.drag(find.byType(ListView), const Offset(0, -1000));
       await tester.pumpAndSettle();
@@ -112,8 +122,12 @@ void main() {
       await tester.tap(submitButton);
       await tester.pumpAndSettle();
 
-      expect(find.text('กรุณาเลือกอาคารจากรายการ'), findsOneWidget);
-      expect(tester.getTopLeft(find.text('อาคาร')).dy, greaterThanOrEqualTo(0));
+      expect(find.text('กรุณาระบุชั้นที่'), findsOneWidget);
+      expect(
+        find.text('เลขห้องต้องเป็นตัวอักษร ตัวเลข หรือ - ไม่เกิน 8 ตัว'),
+        findsNothing,
+      );
+      expect(tester.widget<TextFormField>(roomField).controller!.text, isEmpty);
 
       await tester.drag(find.byType(ListView), const Offset(0, -1000));
       await tester.pumpAndSettle();

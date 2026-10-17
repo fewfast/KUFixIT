@@ -312,6 +312,9 @@ Deno.serve(async (request) => {
     return jsonResponse(400, { error: parsedDevices.error });
   }
   const devices = parsedDevices.devices;
+  if (building !== "other" && devices.some((device) => device.floor == null)) {
+    return jsonResponse(400, { error: "Enter a floor for the selected building." });
+  }
 
   const { data: ticketId, error: createError } = await serviceClient.rpc(
     "create_fix_request",
