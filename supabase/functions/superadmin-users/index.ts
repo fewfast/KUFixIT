@@ -1,0 +1,278 @@
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { verifyTemporarySession } from "../_shared/credentials.ts";
+import { getSupabaseAdminKey } from "../_shared/supabase_admin_key.ts";
+
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers":
+    "authorization, x-client-info, apikey, content-type, x-supabase-api-version",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+};
+
+type JsonObject = Record<string, unknown>;
+
+function jsonResponse(status: number, body: JsonObject) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+}
+
+function isRecord(value: unknown): value is JsonObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+Deno.serve(async (request) => {
+  if (request.method === "OPTIONS") {
+    return new Response("ok", { headers: corsHeaders });
+  }
+  if (request.method !== "POST") {
+    return jsonResponse(405, { error: "Method not allowed." });
+  }
+
+  const supabaseUrl = Deno.env.get("SUPABASE_URL");
+  const serviceRoleKey = getSupabaseAdminKey();
+  if (!supabaseUrl || !serviceRoleKey) {
+    console.error("Supabase server configuration is missing.");
+    return jsonResponse(500, { error: "User management is not configured." });
+  }
+
+  const token = request.headers.get("authorization")?.match(/^Bearer\s+(.+)$/i)
+    ?.[1];
+  const claims = token
+    ? await verifyTemporarySession(token, serviceRoleKey)
+    : null;
+  if (
+    !claims ||
+    typeof claims.sub !== "string" ||
+    (claims.role !== "Admin" && claims.role !== "SuperAdmin")
+  ) {
+    return jsonResponse(403, { error: "หน้านี้สำหรับผู้ดูแลระบบเท่านั้น" });
+  }
+
+  const supabase = createClient(supabaseUrl, serviceRoleKey, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
+  const isSystemAccount = claims.username === claims.sub;
+  let requesterDisplayName: string;
+  try {
+    if (isSystemAccount) {
+      const { data, error } = await supabase
+        .from("Systems_Users")
+        .select('"Username", role, endtime')
+        .eq("Username", claims.sub)
+        .maybeSingle();
+      if (error) throw error;
+      if (
+        !data ||
+        data.role !== claims.role ||
+        (data.endtime !== null &&
+          (typeof data.endtime !== "string" ||
+            !Number.isFinite(Date.parse(data.endtime)) ||
+            Date.parse(data.endtime) <= Date.now()))
+      ) {
+        return jsonResponse(403, { error: "ต้องใช้บัญชีผู้ดูแลระบบที่ยังใช้งานได้" });
+      }
+      requesterDisplayName = data.Username;
+    } else {
+      const { data, error } = await supabase
+        .from("Users")
+        .select('role, status, "Display Name"')
+        .eq("google_auth_user_id", claims.sub)
+        .maybeSingle();
+      if (error) throw error;
+      if (!data || data.role !== claims.role || data.status !== "active") {
+        return jsonResponse(403, { error: "ต้องใช้บัญชีผู้ดูแลระบบที่ยังใช้งานได้" });
+      }
+      requesterDisplayName = data["Display Name"];
+    }
+  } catch (error) {
+    console.error("Failed to verify the SuperAdmin account.", error);
+    return jsonResponse(500, { error: "ไม่สามารถตรวจสอบสิทธิ์ SuperAdmin ได้" });
+  }
+
+  let payload: JsonObject;
+  try {
+    const body: unknown = await request.json();
+    if (!isRecord(body)) return jsonResponse(400, { error: "Invalid request body." });
+    payload = body;
+  } catch {
+    return jsonResponse(400, { error: "Invalid JSON request body." });
+  }
+
+  const action = payload.action;
+  if (action === "list-users") {
+    const users: JsonObject[] = [];
+    for (let from = 0; ; from += 500) {
+      let query = supabase
+        .from("Users")
+        .select('uid, created_at, "Display Name", role, status')
+        .order("created_at", { ascending: false });
+      if (claims.role === "Admin") query = query.eq("role", "User");
+      const { data, error } = await query.range(from, from + 499);
+      if (error) {
+        console.error("Failed to list users for SuperAdmin.", error);
+        return jsonResponse(500, { error: "ไม่สามารถโหลดข้อมูลผู้ใช้ได้" });
+      }
+      for (const user of data) {
+        users.push({
+          uid: user.uid,
+          created_at: user.created_at,
+          displayName: user["Display Name"],
+          role: user.role,
+          status: user.status,
+        });
+      }
+      if (data.length < 500) break;
+    }
+    return jsonResponse(200, { users });
+  }
+
+  if (action === "submit-change") {
+    const uid = payload.uid;
+    const changes = payload.changes;
+    if (
+      typeof uid !== "string" ||
+      !/^u_[0-9]{10}$/.test(uid) ||
+      !isRecord(changes) ||
+      Object.keys(changes).length === 0 ||
+      Object.keys(changes).some((key) =>
+        !["displayName", "role", "status"].includes(key)
+      )
+    ) {
+      return jsonResponse(400, { error: "ข้อมูลคำขอแก้ไขไม่ถูกต้อง" });
+    }
+    if (
+      claims.role === "Admin" &&
+      (Object.keys(changes).length !== 1 || !("displayName" in changes))
+    ) {
+      return jsonResponse(403, {
+        error: "Admin สามารถแก้ไขได้เฉพาะชื่อที่แสดง",
+      });
+    }
+
+    let requestedDisplayName: string | null = null;
+    let requestedRole: string | null = null;
+    let requestedStatus: string | null = null;
+    if ("displayName" in changes) {
+      if (typeof changes.displayName !== "string") {
+        return jsonResponse(400, { error: "กรุณาตรวจสอบชื่อที่แสดง" });
+      }
+      requestedDisplayName = changes.displayName.trim();
+      if (!requestedDisplayName || requestedDisplayName.length > 160) {
+        return jsonResponse(400, { error: "กรุณาตรวจสอบชื่อที่แสดง" });
+      }
+    }
+    if ("role" in changes) {
+      if (changes.role !== "User" && changes.role !== "Admin") {
+        return jsonResponse(400, { error: "บทบาทผู้ใช้ไม่ถูกต้อง" });
+      }
+      requestedRole = changes.role;
+    }
+    if ("status" in changes) {
+      if (changes.status !== "active" && changes.status !== "unactive") {
+        return jsonResponse(400, { error: "สถานะผู้ใช้ไม่ถูกต้อง" });
+      }
+      requestedStatus = changes.status;
+    }
+
+    const { data: target, error: targetError } = await supabase
+      .from("Users")
+      .select('uid, "Display Name", role, status')
+      .eq("uid", uid)
+      .maybeSingle();
+    if (targetError) {
+      console.error("Failed to load target user.", targetError);
+      return jsonResponse(500, { error: "ไม่สามารถตรวจสอบผู้ใช้เป้าหมายได้" });
+    }
+    if (!target) return jsonResponse(404, { error: "ไม่พบผู้ใช้ที่ต้องการแก้ไข" });
+    if (claims.role === "Admin") {
+      if (target.role !== "User") {
+        return jsonResponse(404, { error: "ไม่พบผู้ใช้ที่ต้องการแก้ไข" });
+      }
+      const { error: updateError } = await supabase
+        .from("Users")
+        .update({ "Display Name": requestedDisplayName })
+        .eq("uid", target.uid);
+      if (updateError) {
+        console.error("Admin failed to update a user display name.", updateError);
+        return jsonResponse(500, { error: "ไม่สามารถบันทึกชื่อที่แสดงได้" });
+      }
+      return jsonResponse(200, {
+        result: { status: "updated", displayNameUpdated: true },
+      });
+    }
+    const { data, error } = await supabase.rpc(
+      "submit_superadmin_user_change",
+      {
+        p_target_uid: target.uid,
+        p_requester_id: claims.sub,
+        p_requester_is_system: isSystemAccount,
+        p_requester_display_name: requesterDisplayName,
+        p_display_name: requestedDisplayName,
+        p_role: requestedRole,
+        p_status: requestedStatus,
+      },
+    );
+    if (error) {
+      console.error("Failed to submit SuperAdmin user change.", error);
+      return jsonResponse(409, { error: error.message });
+    }
+    return jsonResponse(200, { result: data });
+  }
+
+  if (action === "list-requests") {
+    if (claims.role !== "SuperAdmin") {
+      return jsonResponse(403, { error: "ต้องใช้บัญชี SuperAdmin" });
+    }
+    const requests: JsonObject[] = [];
+    for (let from = 0; ; from += 500) {
+      const { data, error } = await supabase
+        .from("superadmin_user_change_requests")
+        .select(
+          "id, created_at, target_uid, target_display_name, current_display_name, old_role, current_status, requested_display_name, requested_role, requested_status, requester_id, requester_is_system, requester_display_name, status",
+        )
+        .order("created_at", { ascending: false })
+        .range(from, from + 499);
+      if (error) {
+        console.error("Failed to list SuperAdmin user change requests.", error);
+        return jsonResponse(500, { error: "ไม่สามารถโหลดคำขอยืนยันได้" });
+      }
+      requests.push(...data);
+      if (data.length < 500) break;
+    }
+    return jsonResponse(200, { requests });
+  }
+
+  if (action === "resolve-request") {
+    if (claims.role !== "SuperAdmin") {
+      return jsonResponse(403, { error: "ต้องใช้บัญชี SuperAdmin" });
+    }
+    const requestId = payload.requestId;
+    const decision = payload.decision;
+    if (
+      typeof requestId !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+        .test(requestId) ||
+      (decision !== "approved" && decision !== "rejected")
+    ) {
+      return jsonResponse(400, { error: "ข้อมูลการยืนยันไม่ถูกต้อง" });
+    }
+    const { data, error } = await supabase.rpc(
+      "resolve_superadmin_user_change_request",
+      {
+        p_request_id: requestId,
+        p_actor_id: claims.sub,
+        p_actor_is_system: isSystemAccount,
+        p_decision: decision,
+      },
+    );
+    if (error) {
+      console.error("Failed to resolve a SuperAdmin user change request.", error);
+      return jsonResponse(409, { error: error.message });
+    }
+    return jsonResponse(200, { requestId, status: data });
+  }
+
+  return jsonResponse(400, { error: "Unknown user management action." });
+});

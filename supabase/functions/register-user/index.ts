@@ -72,6 +72,11 @@ async function registrationResponse(
       error: "Registration could not be completed. Please try again.",
     });
   }
+  if (account.status !== "active") {
+    return jsonResponse(403, {
+      error: "บัญชีนี้ถูกระงับการใช้งาน กรุณาติดต่อผู้ดูแลระบบ",
+    });
+  }
   try {
     await ensureProfileAvatarBucket(supabase, account.uid);
   } catch (error) {

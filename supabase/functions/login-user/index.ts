@@ -62,6 +62,11 @@ Deno.serve(async (request) => {
       code: "google_account_not_registered",
     });
   }
+  if (account.status !== "active") {
+    return jsonResponse(403, {
+      error: "บัญชีนี้ถูกระงับการใช้งาน กรุณาติดต่อผู้ดูแลระบบ",
+    });
+  }
 
   const displayNameParts = account["Display Name"].trim().split(/\s+/);
   const user: TemporaryUser = {

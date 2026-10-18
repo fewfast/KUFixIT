@@ -9,8 +9,10 @@ import '../auth/temporary_account_session.dart';
 import '../database/connect.dart';
 import 'fixRequest.dart';
 import 'personal_info_page.dart';
+import 'superAccept.dart';
 import 'technicianManager.dart';
 import 'ticketMonitor.dart';
+import 'userManager.dart';
 
 class Layout extends StatefulWidget {
   const Layout({super.key, this.roleOverride});
@@ -210,6 +212,10 @@ class _LayoutState extends State<Layout> {
               const FixRequestPage()
             else if (page.id == 'technician_manager')
               const TechnicianManagerPage()
+            else if (page.id == 'users')
+              const UserManagerPage()
+            else if (page.id == 'action_confirmation')
+              const SuperAcceptPage()
             else
               _PageContent(page: page, role: role),
         ],
@@ -493,6 +499,12 @@ List<_PageInfo> _pagesFor(String role) {
     Icons.dashboard_outlined,
     'ภาพรวมการใช้งานระบบ',
   );
+  final adminRequests = const _PageInfo(
+    'dashboard',
+    'คำร้องแจ้งซ่อม',
+    Icons.home_repair_service_outlined,
+    'จัดการคำร้องแจ้งซ่อมทั้งหมด',
+  );
 
   return switch (role) {
     'Technician' => [
@@ -510,13 +522,7 @@ List<_PageInfo> _pagesFor(String role) {
       ),
     ],
     'Admin' => [
-      dashboard,
-      const _PageInfo(
-        'requests',
-        'คำร้องแจ้งซ่อม',
-        Icons.home_repair_service_outlined,
-        'จัดการคำร้องแจ้งซ่อมทั้งหมด',
-      ),
+      adminRequests,
       const _PageInfo(
         'users',
         'จัดการผู้ใช้',

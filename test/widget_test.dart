@@ -104,7 +104,7 @@ void main() {
     );
   });
 
-  testWidgets('Admin dashboard shows the repair monitor with admin access', (
+  testWidgets('Admin home is the repair monitor navigation item', (
     tester,
   ) async {
     await tester.pumpWidget(
@@ -114,6 +114,27 @@ void main() {
     expect(find.text('ติดตามงานซ่อม'), findsOneWidget);
     expect(find.text('ค้นหา TicketId'), findsOneWidget);
     expect(find.text('กรุณาเข้าสู่ระบบด้วยบัญชีผู้ดูแลระบบ'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('เปิดเมนู'));
+    await tester.pumpAndSettle();
+
+    final drawer = find.byType(Drawer);
+    expect(
+      find.descendant(of: drawer, matching: find.text('หน้าหลัก')),
+      findsNothing,
+    );
+    expect(
+      find.descendant(of: drawer, matching: find.text('คำร้องแจ้งซ่อม')),
+      findsOneWidget,
+    );
+    final menuLabels = tester
+        .widgetList<ListTile>(
+          find.descendant(of: drawer, matching: find.byType(ListTile)),
+        )
+        .map((tile) => (tile.title! as Text).data)
+        .toList();
+    expect(menuLabels.first, 'คำร้องแจ้งซ่อม');
+    expect(menuLabels.where((label) => label == 'คำร้องแจ้งซ่อม').length, 1);
   });
 
   testWidgets('SuperAdmin drawer omits restricted navigation items', (
@@ -157,6 +178,15 @@ void main() {
       'ยืนยันการกระทำ',
       'รายงาน',
     ]);
+
+    await tester.tap(find.text('จัดการผู้ใช้'));
+    await tester.pumpAndSettle();
+    expect(find.text('ค้นหา user'), findsOneWidget);
+    await tester.tap(find.byTooltip('เปิดเมนู'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('ยืนยันการกระทำ'));
+    await tester.pumpAndSettle();
+    expect(find.text('ยืนยันการกระทำ'), findsOneWidget);
   });
 
   testWidgets(

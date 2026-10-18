@@ -83,12 +83,13 @@ async function getProfileIdentity(
 
   const { data: account, error } = await serviceClient
     .from("Users")
-    .select("uid, role")
+    .select("uid, role, status")
     .eq("google_auth_user_id", googleUserId)
     .maybeSingle();
   if (error) throw error;
   if (
     !account ||
+    account.status !== "active" ||
     (account.role !== "User" && account.role !== "Admin") ||
     typeof account.uid !== "string" ||
     !userUidPattern.test(account.uid)

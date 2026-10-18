@@ -32,6 +32,8 @@ type TicketRow = {
   request_date: string;
   status: string;
   building: string;
+  latitude?: number;
+  longtitude?: number;
   area: string | null;
   floor: string | null;
   room: string | null;
@@ -171,7 +173,29 @@ async function isAdministrator(
     typeof claims.sub === "string" &&
     ["Admin", "SuperAdmin"].includes(String(claims.role))
   ) {
-    return true;
+    if (claims.username === claims.sub) {
+      const { data: account, error } = await supabase
+        .from("Systems_Users")
+        .select('role, endtime')
+        .eq("Username", claims.sub)
+        .maybeSingle();
+      if (error) throw error;
+      return account != null &&
+        ["Admin", "SuperAdmin"].includes(String(account.role)) &&
+        (account.endtime === null ||
+          (typeof account.endtime === "string" &&
+            Date.parse(account.endtime) > Date.now()));
+    }
+
+    const { data: account, error } = await supabase
+      .from("Users")
+      .select("role, status")
+      .eq("google_auth_user_id", claims.sub)
+      .maybeSingle();
+    if (error) throw error;
+    return account != null &&
+      ["Admin", "SuperAdmin"].includes(String(account.role)) &&
+      account.status === "active";
   }
 
   const { data, error } = await supabase.auth.getUser(token);
@@ -184,12 +208,13 @@ async function isAdministrator(
   }
   const { data: account, error: accountError } = await supabase
     .from("Users")
-    .select("role")
+    .select("role, status")
     .eq("google_auth_user_id", data.user.id)
     .maybeSingle();
   if (accountError) throw accountError;
   return account != null &&
-    ["Admin", "SuperAdmin"].includes(String(account.role));
+    ["Admin", "SuperAdmin"].includes(String(account.role)) &&
+    account.status === "active";
 }
 
 Deno.serve(async (request) => {
@@ -268,6 +293,8 @@ Deno.serve(async (request) => {
       }
       const requestFields = requestData as Record<string, unknown>;
       const building = requestFields.building;
+      const latitude = requestFields.latitude;
+      const longtitude = requestFields.longtitude;
       const area = requestFields.area;
       const floor = requestFields.floor;
       const room = requestFields.room;
@@ -276,9 +303,17 @@ Deno.serve(async (request) => {
       const validRequest =
         typeof building === "string" &&
         (building === "other" || /^\d{1,2}$/.test(building)) &&
+        typeof latitude === "number" &&
+        Number.isFinite(latitude) &&
+        latitude >= -90 &&
+        latitude <= 90 &&
+        typeof longtitude === "number" &&
+        Number.isFinite(longtitude) &&
+        longtitude >= -180 &&
+        longtitude <= 180 &&
         (area == null || typeof area === "string") &&
         (building !== "other" || (typeof area === "string" && area.trim() !== "")) &&
-        (building === "other" || area == null) &&
+        (building === "other" || area == null || area === building) &&
         (floor == null ||
           (typeof floor === "string" && /^\d+$/.test(floor) &&
             floor.replace(/^0+/, "").length <= 2 &&
@@ -288,9 +323,67 @@ Deno.serve(async (request) => {
         typeof status === "string" &&
         ["validating", "pending", "finish", "rejected", "cancel"].includes(status) &&
         (technicianTeam == null ||
-          (typeof technicianTeam === "string" && technicianTeam.length <= 120));
+          (typeof technicianTeam === "string" &&
+            technicianTeam.trim() !== "" &&
+            technicianTeam.length <= 120)) &&
+        (status === "pending" || technicianTeam == null);
+      if (
+        status === "pending" &&
+        (typeof technicianTeam !== "string" || technicianTeam.trim() === "")
+      ) {
+        return jsonResponse(400, {
+          error: "A maintenance team is required for pending tickets.",
+        });
+      }
       if (!validRequest) {
         return jsonResponse(400, { error: "Invalid request fields." });
+      }
+
+      if (typeof technicianTeam === "string") {
+        const { data: teamAccounts, error: teamAccountsError } = await supabase
+          .from("Maintenance_Users")
+          .select("start_time, end_time")
+          .eq("teamName", technicianTeam)
+          .eq("status", true);
+        if (teamAccountsError) {
+          console.error("Failed to validate the assigned maintenance team.", teamAccountsError);
+          return jsonResponse(500, { error: "Maintenance teams could not be checked." });
+        }
+        const today = new Date(Date.now() + 7 * 60 * 60 * 1000)
+          .toISOString()
+          .slice(0, 10);
+        const isEligible = (teamAccounts ?? []).some((technician) => {
+          if (
+            !Array.isArray(technician.start_time) ||
+            !Array.isArray(technician.end_time) ||
+            technician.start_time.length !== technician.end_time.length
+          ) {
+            return false;
+          }
+          return technician.start_time.some((start, index) => {
+            const end = technician.end_time[index];
+            if (typeof start !== "string" || typeof end !== "string") {
+              return false;
+            }
+            const startTime = Date.parse(start);
+            const endTime = Date.parse(end);
+            if (!Number.isFinite(startTime) || !Number.isFinite(endTime)) {
+              return false;
+            }
+            const startDate = new Date(startTime + 7 * 60 * 60 * 1000)
+              .toISOString()
+              .slice(0, 10);
+            const endDate = new Date(endTime + 7 * 60 * 60 * 1000)
+              .toISOString()
+              .slice(0, 10);
+            return startDate <= endDate && endDate >= today;
+          });
+        });
+        if (!isEligible) {
+          return jsonResponse(400, {
+            error: "The selected maintenance team has no current or upcoming access period.",
+          });
+        }
       }
 
       const devices = deviceData.map((value) => {
@@ -305,7 +398,9 @@ Deno.serve(async (request) => {
           device.device.length > 120 ||
           (device.discription != null && typeof device.discription !== "string") ||
           typeof device.status !== "string" ||
-          device.status.length > 80 ||
+          !["validating", "pending", "rejected", "finish"].includes(
+            device.status,
+          ) ||
           (device.next_fix_date != null &&
             (!Array.isArray(device.next_fix_date) ||
               device.next_fix_date.length > 50 ||
@@ -335,6 +430,14 @@ Deno.serve(async (request) => {
       if (devices.some((device) => device == null)) {
         return jsonResponse(400, { error: "Invalid device update data." });
       }
+      if (
+        status === "validating" ||
+        devices.some((device) => device!.status === "validating")
+      ) {
+        return jsonResponse(400, {
+          error: "The ticket and all devices must leave validating before they can be saved.",
+        });
+      }
       const deviceIds = devices.map((device) => device!.deviceid);
       if (new Set(deviceIds).size !== deviceIds.length) {
         return jsonResponse(400, { error: "Duplicate device IDs are not allowed." });
@@ -356,22 +459,30 @@ Deno.serve(async (request) => {
         return jsonResponse(400, { error: "The device list does not match this ticket." });
       }
 
-      const { error: ticketUpdateError } = await supabase
-        .from("FixList")
-        .update({
-          building,
-          area: area == null ? null : String(area).trim(),
-          floor: floor == null ? null : String(floor).trim(),
-          room: room == null ? null : String(room).trim(),
-          status,
-          technician_team: technicianTeam == null
+      const { error: ticketUpdateError } = await supabase.rpc(
+        "admin_update_fixlist_and_assign_team",
+        {
+          p_ticket_id: ticketId,
+          p_building: building,
+          p_latitude: latitude,
+          p_longtitude: longtitude,
+          p_area: area == null ? null : String(area).trim(),
+          p_floor: floor == null ? null : String(floor).trim(),
+          p_room: room == null ? null : String(room).trim(),
+          p_status: status,
+          p_technician_team: technicianTeam == null
             ? null
             : String(technicianTeam).trim(),
-        })
-        .eq("TicketId", ticketId);
+        },
+      );
       if (ticketUpdateError) {
-        console.error("Failed to update repair request.", ticketUpdateError);
-        return jsonResponse(500, { error: "Repair request could not be updated." });
+        console.error(
+          "Failed to update repair request and synchronize team assignment.",
+          ticketUpdateError,
+        );
+        return jsonResponse(500, {
+          error: "Repair request and team assignment could not be updated.",
+        });
       }
       for (const device of devices) {
         const { error } = await supabase
@@ -415,7 +526,7 @@ Deno.serve(async (request) => {
     const { data, count, error } = await supabase
       .from("FixList")
       .select(
-        "TicketId, building, area, floor, room, status, request_date, technician_team, fix_history_time_start, fix_history_time_end",
+        "TicketId, building, latitude, longtitude, area, floor, room, status, request_date, technician_team, fix_history_time_start, fix_history_time_end",
         { count: "exact" },
       )
       .order("request_date", { ascending: false })
@@ -608,8 +719,25 @@ Deno.serve(async (request) => {
       console.error("Failed to load ticket devices.", devicesError);
       return jsonResponse(500, { error: "Ticket devices could not be loaded." });
     }
+    const { data: signedPhotos, error: signedPhotosError } = await supabase
+      .storage
+      .from(ticketId)
+      .createSignedUrls(
+        (devices ?? []).map((device) => String(device.deviceid)),
+        300,
+      );
+    if (signedPhotosError) {
+      console.error("Failed to create signed URLs for ticket photos.", signedPhotosError);
+      return jsonResponse(500, { error: "Ticket photos could not be loaded." });
+    }
+    const photoUrls = new Map(
+      (signedPhotos ?? []).map((photo) => [photo.path, photo.signedUrl]),
+    );
     return jsonResponse(200, {
-      devices,
+      devices: (devices ?? []).map((device) => ({
+        ...device,
+        photo_url: photoUrls.get(String(device.deviceid)) ?? null,
+      })),
       technician_history: ticket.technician_history,
       fix_history_time_start: ticket.fix_history_time_start,
       fix_history_time_end: ticket.fix_history_time_end,

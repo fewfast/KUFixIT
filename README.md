@@ -189,11 +189,22 @@ Supabase stack (`npx --yes supabase start` or `status`) additionally requires
 Docker Desktop or Podman; linking and managing a hosted project do not require
 the local stack.
 
+The SuperAdmin user-change approval schema is in
+`supabase/migrations/20261018000000_superadmin_user_change_approvals.sql`.
+Display-name-only edits are saved immediately by
+`supabase/migrations/20261018000001_superadmin_user_change_names_without_approval.sql`;
+role and status changes still require a different active SuperAdmin's approval.
+The linked project has an older local migration,
+`20261017000003_unique_maintenance_technician_display_names.sql`, that is not
+recorded remotely and blocks a normal `db push`; review and resolve that
+migration-history difference before applying future migrations.
+
 To deploy Edge Functions after reviewing the changes, run:
 
 ```sh
 npx --yes supabase functions deploy register-user
 npx --yes supabase functions deploy login-user
+npx --yes supabase functions deploy superadmin-users
 npx --yes supabase functions deploy staff-login
 npx --yes supabase functions deploy update-user-profile
 npx --yes supabase functions deploy profile-avatar

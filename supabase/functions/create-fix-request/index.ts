@@ -214,10 +214,11 @@ async function getRequesterUid(
 
   const { data, error } = await serviceClient
     .from("Users")
-    .select("uid")
+    .select("uid, status")
     .eq("google_auth_user_id", subject)
     .maybeSingle();
   if (error) throw error;
+  if (!data || data.status !== "active") return null;
   const uid = data?.uid;
   if (typeof uid === "number" && Number.isSafeInteger(uid)) {
     const uidText = String(uid);

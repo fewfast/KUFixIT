@@ -76,7 +76,7 @@ Deno.serve(async (request) => {
   });
   const { data: account, error: accountError } = await supabase
     .from("Users")
-    .select("google_auth_user_id")
+    .select("google_auth_user_id, status")
     .eq("google_auth_user_id", claims.sub)
     .maybeSingle();
   if (accountError) {
@@ -85,6 +85,11 @@ Deno.serve(async (request) => {
   }
   if (!account) {
     return jsonResponse(404, { error: "User account was not found." });
+  }
+  if (account.status !== "active") {
+    return jsonResponse(403, {
+      error: "This account is inactive and cannot update its profile.",
+    });
   }
 
   const profileUpdate = {

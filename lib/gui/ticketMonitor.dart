@@ -1,9 +1,15 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
+import 'package:flutter_map/flutter_map.dart' as flutter_map;
+import 'package:latlong2/latlong.dart' as latlong;
 
 import '../auth/temporary_account_session.dart';
 import '../database/connect.dart';
+import 'building_locations.dart';
+
+const _ticketLocationMapCenter = latlong.LatLng(13.1209646, 100.9192182);
 
 class TicketMonitor extends StatefulWidget {
   const TicketMonitor({
@@ -748,6 +754,7 @@ class _ExpandableTicketRowState extends State<_ExpandableTicketRow> {
   }
 
   Future<void> _editTicket() async {
+    if (widget.ticket.status == 'cancel') return;
     if (!_hasLoaded) {
       await _loadDevices();
       if (!mounted || !_hasLoaded) return;
@@ -1054,8 +1061,12 @@ class _ExpandableTicketRowState extends State<_ExpandableTicketRow> {
           ),
           if (widget.adminMode)
             IconButton(
-              tooltip: 'แก้ไขข้อมูลคำร้อง',
-              onPressed: _isLoading ? null : _editTicket,
+              tooltip: widget.ticket.status == 'cancel'
+                  ? 'คำร้องที่ยกเลิกแล้วไม่สามารถแก้ไขได้'
+                  : 'แก้ไขข้อมูลคำร้อง',
+              onPressed: _isLoading || widget.ticket.status == 'cancel'
+                  ? null
+                  : _editTicket,
               icon: const Icon(Icons.edit_outlined),
               iconSize: 20,
               padding: EdgeInsets.zero,
@@ -1323,81 +1334,251 @@ class _AdminTicketEditDialog extends StatefulWidget {
 }
 
 class _AdminTicketEditDialogState extends State<_AdminTicketEditDialog> {
-  static const _statuses = [
-    'validating',
-    'pending',
-    'finish',
-    'rejected',
-    'cancel',
-  ];
+  static const _statuses = ['pending', 'finish', 'rejected'];
   final _formKey = GlobalKey<FormState>();
-  late final TextEditingController _buildingController;
   late final TextEditingController _areaController;
   late final TextEditingController _floorController;
   late final TextEditingController _roomController;
-  late final TextEditingController _technicianTeamController;
   late final List<_DeviceEditControllers> _deviceControllers;
   late String _status;
+  late String? _selectedBuilding;
+  late double _latitude;
+  late double _longitude;
+  bool _otherCoordinatesSelected = false;
+  _MaintenanceTeam? _selectedTeam;
+  TextEditingController? _teamSearchController;
+  List<_MaintenanceTeam> _eligibleTeams = const [];
+  bool _isLoadingTeams = true;
+  String? _teamLoadError;
+
+  bool get _canSelectTechnicianTeam => _status == 'pending';
+  bool get _requiresTechnicianTeam =>
+      _canSelectTechnicianTeam && _selectedTeam == null;
+
+  bool get _hasValidatingStatus =>
+      _status == 'validating' ||
+      _deviceControllers.any((device) => device.status == 'validating');
 
   @override
   void initState() {
     super.initState();
     final ticket = widget.ticket;
-    _buildingController = TextEditingController(text: ticket.building);
+    _selectedBuilding = ticket.building == 'other'
+        ? otherBuildingLabel
+        : buildingOptions.cast<String?>().firstWhere(
+            (option) =>
+                option != null &&
+                RegExp(r'\d+').firstMatch(option)?.group(0) == ticket.building,
+            orElse: () => null,
+          );
+    _latitude = ticket.latitude;
+    _longitude = ticket.longitude;
+    if (_selectedBuilding == otherBuildingLabel) {
+      _otherCoordinatesSelected = true;
+    } else if (_selectedBuilding != null) {
+      final buildingNumber = RegExp(
+        r'\d+',
+      ).firstMatch(_selectedBuilding!)!.group(0)!;
+      final coordinates = buildingCoordinates[buildingNumber];
+      if (coordinates != null) {
+        _latitude = coordinates.$1;
+        _longitude = coordinates.$2;
+      }
+    }
     _areaController = TextEditingController(text: ticket.area ?? '');
     _floorController = TextEditingController(text: ticket.floor ?? '');
     _roomController = TextEditingController(text: ticket.room ?? '');
-    _technicianTeamController = TextEditingController(
-      text: ticket.technicianTeam ?? '',
-    );
     _status = _statuses.contains(ticket.status) ? ticket.status : 'validating';
+    if (_selectedBuilding != null && _selectedBuilding != otherBuildingLabel) {
+      _areaController.text = ticket.building;
+    }
     _deviceControllers = widget.devices
         .map(_DeviceEditControllers.fromDevice)
         .toList(growable: false);
+    unawaited(_loadEligibleTeams());
   }
 
   @override
   void dispose() {
-    _buildingController.dispose();
     _areaController.dispose();
     _floorController.dispose();
     _roomController.dispose();
-    _technicianTeamController.dispose();
+    _teamSearchController = null;
     for (final device in _deviceControllers) {
       device.dispose();
     }
     super.dispose();
   }
 
+  Future<void> _loadEligibleTeams() async {
+    final account = TemporaryAccountSession.instance.account;
+    if (account == null) {
+      setState(() {
+        _isLoadingTeams = false;
+        _teamLoadError = 'เซสชันหมดอายุ กรุณาเข้าสู่ระบบด้วยบัญชีผู้ดูแลระบบ';
+      });
+      return;
+    }
+    if (!SupabaseConnection.isInitialized) {
+      setState(() {
+        _isLoadingTeams = false;
+        _teamLoadError = 'ยังไม่ได้เชื่อมต่อ Supabase';
+      });
+      return;
+    }
+
+    try {
+      final response = await SupabaseConnection.client.functions.invoke(
+        'maintenance-teams',
+        headers: {'Authorization': 'Bearer ${account.accessToken}'},
+        body: {'action': 'list-eligible-teams'},
+      );
+      final data = response.data;
+      if (data is! Map || data['teams'] is! List) {
+        throw const FormatException('รูปแบบรายชื่อทีมช่างไม่ถูกต้อง');
+      }
+      final teams = (data['teams'] as List)
+          .map(_MaintenanceTeam.fromJson)
+          .toList(growable: false);
+      if (!mounted) return;
+      setState(() {
+        _eligibleTeams = teams;
+        _selectedTeam = teams
+            .where((team) => team.name == widget.ticket.technicianTeam)
+            .firstOrNull;
+        if (!_canSelectTechnicianTeam) _selectedTeam = null;
+        _isLoadingTeams = false;
+        _teamLoadError = null;
+      });
+    } on Exception catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _isLoadingTeams = false;
+        _teamLoadError = 'โหลดทีมช่างไม่สำเร็จ: $error';
+      });
+    }
+  }
+
+  Future<void> _chooseOtherBuildingCoordinates() async {
+    final initialPosition = latlong.LatLng(_latitude, _longitude);
+    var selectedPosition = initialPosition;
+    final result = await showDialog<latlong.LatLng>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setDialogState) => AlertDialog(
+          title: const Text('เลือกตำแหน่งบนแผนที่'),
+          content: SizedBox(
+            width: 600,
+            height: 420,
+            child: Column(
+              children: [
+                Expanded(
+                  child: flutter_map.FlutterMap(
+                    options: flutter_map.MapOptions(
+                      initialCenter: selectedPosition,
+                      initialZoom: 16,
+                      onTap: (_, position) =>
+                          setDialogState(() => selectedPosition = position),
+                    ),
+                    children: [
+                      flutter_map.TileLayer(
+                        urlTemplate:
+                            'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                        userAgentPackageName: 'com.example.mobileproject',
+                      ),
+                      flutter_map.MarkerLayer(
+                        markers: [
+                          flutter_map.Marker(
+                            point: selectedPosition,
+                            child: Icon(
+                              Icons.location_pin,
+                              color: Theme.of(context).colorScheme.error,
+                              size: 40,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const flutter_map.RichAttributionWidget(
+                        showFlutterMapAttribution: false,
+                        attributions: [
+                          flutter_map.TextSourceAttribution(
+                            '© OpenStreetMap contributors',
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Latitude: ${selectedPosition.latitude.toStringAsFixed(6)}  '
+                  'Longitude: ${selectedPosition.longitude.toStringAsFixed(6)}',
+                  textAlign: TextAlign.center,
+                ),
+                const Text('แตะบนแผนที่เพื่อเลือกตำแหน่ง'),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('ยกเลิก'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, selectedPosition),
+              child: const Text('เลือกตำแหน่งนี้'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (result == null || !mounted) return;
+    setState(() {
+      _latitude = result.latitude;
+      _longitude = result.longitude;
+      _otherCoordinatesSelected = true;
+    });
+  }
+
   void _save() {
+    if (_hasValidatingStatus) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'กรุณาเปลี่ยนสถานะคำร้องและอุปกรณ์ที่ยังเป็น validating',
+          ),
+        ),
+      );
+      return;
+    }
+    if (_requiresTechnicianTeam) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('กรุณาเลือกทีมช่างก่อนบันทึก')),
+      );
+      return;
+    }
+    if (_selectedBuilding == otherBuildingLabel && !_otherCoordinatesSelected) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('กรุณาเลือกพิกัดบนแผนที่')));
+      return;
+    }
     if (!_formKey.currentState!.validate()) return;
     final devices = <Map<String, Object?>>[];
+    final selectedRepairDate = _canSelectTechnicianTeam
+        ? _selectedTeam?.nextRepairDate
+        : null;
     for (var index = 0; index < widget.devices.length; index++) {
       final device = widget.devices[index];
       final fields = _deviceControllers[index];
-      final rawDates = fields.nextFixDate.text.split('\n');
-      final parsedDates = <DateTime?>[];
-      for (final rawValue in rawDates) {
-        final rawDate = rawValue.trim();
-        final parsedDate = rawDate.isEmpty ? null : DateTime.tryParse(rawDate);
-        if (rawDate.isNotEmpty && parsedDate == null) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('วันซ่อมถัดไปของ ${device.name} ไม่ถูกต้อง'),
-            ),
-          );
-          return;
-        }
-        parsedDates.add(parsedDate);
-      }
       devices.add({
         'deviceid': device.deviceId,
         'device': fields.name.text.trim(),
         'discription': fields.description.text.trim(),
-        'status': fields.status.text.trim(),
-        'next_fix_date': parsedDates
-            .map((date) => date?.toIso8601String())
-            .toList(),
+        'status': fields.status,
+        'next_fix_date': selectedRepairDate == null
+            ? <String>[]
+            : [selectedRepairDate.toIso8601String()],
         'technician_comment': fields.technicianComments.text
             .split('\n')
             .map((comment) => comment.trim())
@@ -1407,12 +1588,12 @@ class _AdminTicketEditDialogState extends State<_AdminTicketEditDialog> {
     }
     Navigator.of(context).pop({
       'request': {
-        'building': _buildingController.text.trim(),
-        'area':
-            _buildingController.text.trim() != 'other' ||
-                _areaController.text.trim().isEmpty
-            ? null
-            : _areaController.text.trim(),
+        'building': _selectedBuilding == otherBuildingLabel
+            ? 'other'
+            : RegExp(r'\d+').firstMatch(_selectedBuilding!)!.group(0),
+        'latitude': _latitude,
+        'longtitude': _longitude,
+        'area': _areaController.text.trim(),
         'floor': _floorController.text.trim().isEmpty
             ? null
             : _floorController.text.trim(),
@@ -1420,9 +1601,9 @@ class _AdminTicketEditDialogState extends State<_AdminTicketEditDialog> {
             ? null
             : _roomController.text.trim(),
         'status': _status,
-        'technician_team': _technicianTeamController.text.trim().isEmpty
-            ? null
-            : _technicianTeamController.text.trim(),
+        'technician_team': _canSelectTechnicianTeam
+            ? _selectedTeam?.name
+            : null,
       },
       'devices': devices,
     });
@@ -1444,27 +1625,107 @@ class _AdminTicketEditDialogState extends State<_AdminTicketEditDialog> {
                   'ข้อมูลคำร้อง',
                   style: Theme.of(context).textTheme.titleMedium,
                 ),
-                TextFormField(
-                  controller: _buildingController,
-                  decoration: const InputDecoration(
-                    labelText: 'อาคาร (เลขอาคาร หรือ other)',
-                  ),
-                  validator: (value) {
-                    final building = value?.trim() ?? '';
-                    if (building != 'other' &&
-                        !RegExp(r'^\d{1,2}$').hasMatch(building)) {
-                      return 'กรอกเลขอาคาร 1-2 หลัก หรือ other';
-                    }
-                    return null;
+                Autocomplete<String>(
+                  initialValue: TextEditingValue(text: _selectedBuilding ?? ''),
+                  optionsBuilder: (textEditingValue) {
+                    final query = textEditingValue.text.trim().toLowerCase();
+                    return buildingOptions.where(
+                      (building) =>
+                          query.isEmpty ||
+                          building.toLowerCase().contains(query),
+                    );
                   },
+                  onSelected: (building) {
+                    setState(() {
+                      _selectedBuilding = building;
+                      if (building == otherBuildingLabel) {
+                        _otherCoordinatesSelected =
+                            widget.ticket.building == 'other' &&
+                            _selectedBuilding == otherBuildingLabel;
+                        if (widget.ticket.building != 'other') {
+                          _areaController.clear();
+                        }
+                      } else {
+                        final buildingNumber = RegExp(
+                          r'\d+',
+                        ).firstMatch(building)!.group(0)!;
+                        _areaController.text = buildingNumber;
+                        final coordinates = buildingCoordinates[buildingNumber];
+                        if (coordinates != null) {
+                          _latitude = coordinates.$1;
+                          _longitude = coordinates.$2;
+                        }
+                        _otherCoordinatesSelected = false;
+                      }
+                    });
+                  },
+                  fieldViewBuilder:
+                      (context, controller, focusNode, onFieldSubmitted) =>
+                          TextFormField(
+                            controller: controller,
+                            focusNode: focusNode,
+                            decoration: const InputDecoration(
+                              labelText: 'อาคาร',
+                              hintText: 'พิมพ์เพื่อค้นหาอาคาร',
+                            ),
+                            onChanged: (value) {
+                              if (value != _selectedBuilding) {
+                                setState(() => _selectedBuilding = null);
+                              }
+                            },
+                            validator: (value) => _selectedBuilding == null
+                                ? 'กรุณาเลือกอาคารจากรายการ'
+                                : null,
+                          ),
+                  optionsViewBuilder: (context, onSelected, options) => Align(
+                    alignment: Alignment.topLeft,
+                    child: Material(
+                      elevation: 4,
+                      child: SizedBox(
+                        width: 500,
+                        height: 240,
+                        child: ListView.builder(
+                          padding: EdgeInsets.zero,
+                          itemCount: options.length,
+                          itemBuilder: (context, index) {
+                            final building = options.elementAt(index);
+                            return ListTile(
+                              title: Text(building),
+                              onTap: () => onSelected(building),
+                            );
+                          },
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                if (_selectedBuilding == otherBuildingLabel) ...[
+                  const SizedBox(height: 8),
+                  OutlinedButton.icon(
+                    onPressed: _chooseOtherBuildingCoordinates,
+                    icon: const Icon(Icons.map_outlined),
+                    label: const Text('เลือก Latitude / Longitude บนแผนที่'),
+                  ),
+                ],
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Text(
+                    'Latitude: ${_latitude.toStringAsFixed(6)}  '
+                    'Longitude: ${_longitude.toStringAsFixed(6)}',
+                    textAlign: TextAlign.center,
+                  ),
                 ),
                 TextFormField(
                   controller: _areaController,
-                  decoration: const InputDecoration(
-                    labelText: 'บริเวณ (กรณีเลือก other)',
+                  readOnly: _selectedBuilding != otherBuildingLabel,
+                  decoration: InputDecoration(
+                    labelText: 'บริเวณ',
+                    helperText: _selectedBuilding != otherBuildingLabel
+                        ? 'ระบบใส่เลขอาคารให้อัตโนมัติ'
+                        : 'ระบุบริเวณได้อิสระ',
                   ),
                   validator: (value) =>
-                      _buildingController.text.trim() == 'other' &&
+                      _selectedBuilding == otherBuildingLabel &&
                           (value == null || value.trim().isEmpty)
                       ? 'กรุณาระบุบริเวณ'
                       : null,
@@ -1504,21 +1765,138 @@ class _AdminTicketEditDialogState extends State<_AdminTicketEditDialog> {
                   },
                 ),
                 DropdownButtonFormField<String>(
-                  value: _status,
+                  initialValue: _statuses.contains(_status) ? _status : null,
                   decoration: const InputDecoration(labelText: 'สถานะคำร้อง'),
                   items: [
                     for (final status in _statuses)
                       DropdownMenuItem(value: status, child: Text(status)),
                   ],
                   onChanged: (value) {
-                    if (value != null) setState(() => _status = value);
+                    if (value == null) return;
+                    setState(() {
+                      _status = value;
+                      if (!_canSelectTechnicianTeam) {
+                        _selectedTeam = null;
+                        _teamSearchController?.clear();
+                      }
+                    });
                   },
+                  validator: (value) =>
+                      value == null ? 'กรุณาเลือกสถานะคำร้อง' : null,
                 ),
-                TextFormField(
-                  controller: _technicianTeamController,
-                  decoration: const InputDecoration(labelText: 'ทีมช่าง'),
-                  maxLength: 120,
+                Autocomplete<_MaintenanceTeam>(
+                  key: ValueKey(_isLoadingTeams),
+                  initialValue: TextEditingValue(
+                    text: !_canSelectTechnicianTeam
+                        ? ''
+                        : _selectedTeam?.name ?? '',
+                  ),
+                  displayStringForOption: (team) => team.name,
+                  optionsBuilder: (textEditingValue) {
+                    if (!_canSelectTechnicianTeam ||
+                        _isLoadingTeams ||
+                        _teamLoadError != null) {
+                      return const [];
+                    }
+                    final query = textEditingValue.text.trim().toLowerCase();
+                    return _eligibleTeams.where(
+                      (team) =>
+                          query.isEmpty ||
+                          team.name.toLowerCase().contains(query),
+                    );
+                  },
+                  onSelected: (team) => setState(() => _selectedTeam = team),
+                  fieldViewBuilder:
+                      (context, controller, focusNode, onFieldSubmitted) {
+                        _teamSearchController = controller;
+                        return TextFormField(
+                          controller: controller,
+                          focusNode: focusNode,
+                          enabled:
+                              _canSelectTechnicianTeam &&
+                              !_isLoadingTeams &&
+                              _teamLoadError == null,
+                          decoration: InputDecoration(
+                            labelText: 'ทีมช่าง',
+                            hintText: !_canSelectTechnicianTeam
+                                ? 'สถานะนี้ไม่สามารถเลือกทีมช่างได้'
+                                : 'พิมพ์เพื่อค้นหาทีมช่าง',
+                            helperText: _canSelectTechnicianTeam
+                                ? 'วันซ่อมถัดไปกำหนดจากวันที่ทีมช่างเข้าใช้งานได้ใกล้ที่สุด'
+                                : null,
+                            suffixIcon: _isLoadingTeams
+                                ? const Padding(
+                                    padding: EdgeInsets.all(12),
+                                    child: SizedBox(
+                                      width: 18,
+                                      height: 18,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
+                                    ),
+                                  )
+                                : null,
+                          ),
+                          onChanged: (value) {
+                            if (_selectedTeam?.name != value) {
+                              setState(() => _selectedTeam = null);
+                            }
+                          },
+                        );
+                      },
+                  optionsViewBuilder: (context, onSelected, options) => Align(
+                    alignment: Alignment.topLeft,
+                    child: Material(
+                      elevation: 4,
+                      child: SizedBox(
+                        width: 500,
+                        height: 300,
+                        child: ListView.builder(
+                          padding: EdgeInsets.zero,
+                          itemCount: options.length,
+                          itemBuilder: (context, index) {
+                            final team = options.elementAt(index);
+                            return ListTile(
+                              title: Text(team.name),
+                              subtitle: Text(team.periodSummary),
+                              onTap: () => onSelected(team),
+                            );
+                          },
+                        ),
+                      ),
+                    ),
+                  ),
                 ),
+                if (_teamLoadError case final error?)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Row(
+                      children: [
+                        Expanded(child: Text(error)),
+                        TextButton(
+                          onPressed: () {
+                            setState(() {
+                              _isLoadingTeams = true;
+                              _teamLoadError = null;
+                            });
+                            unawaited(_loadEligibleTeams());
+                          },
+                          child: const Text('ลองอีกครั้ง'),
+                        ),
+                      ],
+                    ),
+                  ),
+                if (_requiresTechnicianTeam && _teamLoadError == null)
+                  const Padding(
+                    padding: EdgeInsets.only(top: 8),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        'กรุณาเลือกทีมช่างก่อนบันทึกคำร้องสถานะ pending',
+                        style: TextStyle(color: Colors.red),
+                      ),
+                    ),
+                  ),
                 const Divider(height: 32),
                 Text(
                   'ข้อมูลดำเนินงานและอุปกรณ์',
@@ -1537,7 +1915,9 @@ class _AdminTicketEditDialogState extends State<_AdminTicketEditDialog> {
           child: const Text('ยกเลิก'),
         ),
         FilledButton.icon(
-          onPressed: _save,
+          onPressed: _hasValidatingStatus || _requiresTechnicianTeam
+              ? null
+              : _save,
           icon: const Icon(Icons.save_outlined),
           label: const Text('บันทึก'),
         ),
@@ -1556,6 +1936,20 @@ class _AdminTicketEditDialogState extends State<_AdminTicketEditDialog> {
           'อุปกรณ์ ${device.deviceId}',
           style: Theme.of(context).textTheme.titleSmall,
         ),
+        if (device.photoUrl case final photoUrl?)
+          Align(
+            alignment: Alignment.centerLeft,
+            child: OutlinedButton.icon(
+              onPressed: () => _viewDevicePhoto(device, photoUrl),
+              icon: const Icon(Icons.image_outlined),
+              label: const Text('ดูรูปอุปกรณ์'),
+            ),
+          )
+        else
+          const Align(
+            alignment: Alignment.centerLeft,
+            child: Text('ไม่มีรูปอุปกรณ์'),
+          ),
         TextFormField(
           controller: fields.name,
           decoration: const InputDecoration(labelText: 'ชื่ออุปกรณ์'),
@@ -1568,37 +1962,53 @@ class _AdminTicketEditDialogState extends State<_AdminTicketEditDialog> {
           decoration: const InputDecoration(labelText: 'รายละเอียดอุปกรณ์'),
           maxLines: 2,
         ),
-        TextFormField(
-          controller: fields.status,
-          decoration: const InputDecoration(labelText: 'สถานะอุปกรณ์'),
-          validator: (value) =>
-              value == null || value.trim().isEmpty ? 'กรุณาระบุสถานะ' : null,
-        ),
-        TextFormField(
-          controller: fields.nextFixDate,
-          decoration: const InputDecoration(
-            labelText: 'วันเข้าซ่อมถัดไป (หนึ่งรายการต่อบรรทัด)',
-            hintText: 'YYYY-MM-DD',
-          ),
-          keyboardType: TextInputType.datetime,
-          maxLines: 3,
-          validator: (value) =>
-              (value?.split('\n') ?? const <String>[]).any(
-                (dateValue) =>
-                    dateValue.trim().isNotEmpty &&
-                    DateTime.tryParse(dateValue.trim()) == null,
-              )
-              ? 'กรอกวันที่ในรูปแบบ YYYY-MM-DD'
+        DropdownButtonFormField<String>(
+          initialValue: _deviceStatuses.contains(fields.status)
+              ? fields.status
               : null,
-        ),
-        TextFormField(
-          controller: fields.technicianComments,
-          decoration: const InputDecoration(
-            labelText: 'บันทึกช่าง (หนึ่งรายการต่อบรรทัด)',
-          ),
-          maxLines: 3,
+          decoration: const InputDecoration(labelText: 'สถานะอุปกรณ์'),
+          items: [
+            for (final status in _deviceStatuses)
+              DropdownMenuItem(value: status, child: Text(status)),
+          ],
+          onChanged: (value) {
+            if (value != null) setState(() => fields.status = value);
+          },
+          validator: (value) => value == null ? 'กรุณาเลือกสถานะอุปกรณ์' : null,
         ),
       ],
+    );
+  }
+
+  Future<void> _viewDevicePhoto(_TicketDevice device, String photoUrl) {
+    return showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('รูปอุปกรณ์ ${device.deviceId}'),
+        content: SizedBox(
+          width: 640,
+          height: 480,
+          child: InteractiveViewer(
+            child: Image.network(
+              photoUrl,
+              fit: BoxFit.contain,
+              errorBuilder: (context, error, stackTrace) => const Center(
+                child: Text('โหลดรูปอุปกรณ์ไม่สำเร็จ กรุณาปิดแล้วลองใหม่'),
+              ),
+              loadingBuilder: (context, child, progress) {
+                if (progress == null) return child;
+                return const Center(child: CircularProgressIndicator());
+              },
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('ปิด'),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -1608,26 +2018,21 @@ class _DeviceEditControllers {
     required this.name,
     required this.description,
     required this.status,
-    required this.nextFixDate,
     required this.technicianComments,
   });
 
   final TextEditingController name;
   final TextEditingController description;
-  final TextEditingController status;
-  final TextEditingController nextFixDate;
+  String status;
   final TextEditingController technicianComments;
 
   factory _DeviceEditControllers.fromDevice(_TicketDevice device) {
     return _DeviceEditControllers(
       name: TextEditingController(text: device.name),
       description: TextEditingController(text: device.description ?? ''),
-      status: TextEditingController(text: device.status),
-      nextFixDate: TextEditingController(
-        text: device.nextFixDates
-            .map((date) => date?.toIso8601String().split('T').first ?? '')
-            .join('\n'),
-      ),
+      status: _deviceStatuses.contains(device.status)
+          ? device.status
+          : 'validating',
       technicianComments: TextEditingController(
         text: device.technicianComments.whereType<String>().join('\n'),
       ),
@@ -1637,9 +2042,74 @@ class _DeviceEditControllers {
   void dispose() {
     name.dispose();
     description.dispose();
-    status.dispose();
-    nextFixDate.dispose();
     technicianComments.dispose();
+  }
+}
+
+const _deviceStatuses = ['pending', 'rejected', 'finish'];
+
+class _MaintenanceTeam {
+  const _MaintenanceTeam({required this.name, required this.periods});
+
+  final String name;
+  final List<_MaintenanceAccessPeriod> periods;
+
+  String get periodSummary {
+    final period = periods.first;
+    return '${DateFormat('dd/MM/yyyy').format(period.start)} - '
+        '${DateFormat('dd/MM/yyyy').format(period.end)} '
+        '(${period.remainingText})';
+  }
+
+  DateTime get nextRepairDate {
+    final period = periods.first;
+    final today = DateTime.now();
+    final todayStart = DateTime(today.year, today.month, today.day);
+    return period.start.isBefore(todayStart) ? todayStart : period.start;
+  }
+
+  factory _MaintenanceTeam.fromJson(dynamic value) {
+    if (value is! Map ||
+        value['name'] is! String ||
+        value['periods'] is! List) {
+      throw const FormatException('ข้อมูลทีมช่างไม่ถูกต้อง');
+    }
+    final periods = (value['periods'] as List)
+        .map(_MaintenanceAccessPeriod.fromJson)
+        .toList(growable: false);
+    if (periods.isEmpty) {
+      throw const FormatException('ทีมช่างไม่มีช่วงเวลาเข้าใช้งาน');
+    }
+    return _MaintenanceTeam(name: value['name'] as String, periods: periods);
+  }
+}
+
+class _MaintenanceAccessPeriod {
+  const _MaintenanceAccessPeriod({required this.start, required this.end});
+
+  final DateTime start;
+  final DateTime end;
+
+  String get remainingText {
+    final endExclusive = DateTime(end.year, end.month, end.day + 1);
+    final remaining = endExclusive.difference(DateTime.now());
+    if (remaining <= Duration.zero) return 'หมดเวลาแล้ว';
+    final days = remaining.inDays;
+    final hours = remaining.inHours % 24;
+    if (days == 0) return 'เหลือ ${remaining.inHours} ชม.';
+    return hours == 0 ? 'เหลือ $days วัน' : 'เหลือ $days วัน $hours ชม.';
+  }
+
+  factory _MaintenanceAccessPeriod.fromJson(dynamic value) {
+    if (value is! Map || value['start'] is! String || value['end'] is! String) {
+      throw const FormatException('ช่วงเวลาเข้าใช้งานทีมช่างไม่ถูกต้อง');
+    }
+    final start = DateTime.tryParse(value['start'] as String);
+    final end = DateTime.tryParse(value['end'] as String);
+    if (start == null || end == null || start.isAfter(end)) {
+      throw const FormatException('ช่วงเวลาเข้าใช้งานทีมช่างไม่ถูกต้อง');
+    }
+    return _MaintenanceAccessPeriod(start: start.toLocal(), end: end.toLocal());
   }
 }
 
@@ -1648,6 +2118,8 @@ class _Ticket {
     required this.ticketId,
     required this.requestDate,
     required this.building,
+    required this.latitude,
+    required this.longitude,
     required this.area,
     required this.floor,
     required this.room,
@@ -1661,6 +2133,8 @@ class _Ticket {
   final String ticketId;
   final DateTime requestDate;
   final String building;
+  final double latitude;
+  final double longitude;
   final String? area;
   final String? floor;
   final String? room;
@@ -1703,6 +2177,8 @@ class _Ticket {
         value['TicketId'] is! String ||
         value['request_date'] is! String ||
         value['building'] is! String ||
+        (value['latitude'] != null && value['latitude'] is! num) ||
+        (value['longtitude'] != null && value['longtitude'] is! num) ||
         value['status'] is! String ||
         (value['area'] != null && value['area'] is! String) ||
         (value['floor'] != null && value['floor'] is! String) ||
@@ -1728,10 +2204,21 @@ class _Ticket {
     if (requestDate == null) {
       throw const FormatException('รูปแบบวันที่แจ้งไม่ถูกต้อง');
     }
+    final building = value['building'] as String;
+    final buildingNumber = RegExp(r'\d+').firstMatch(building)?.group(0);
+    final defaultCoordinates = buildingCoordinates[buildingNumber];
+    final latitude = value['latitude'] is num
+        ? (value['latitude'] as num).toDouble()
+        : defaultCoordinates?.$1 ?? _ticketLocationMapCenter.latitude;
+    final longitude = value['longtitude'] is num
+        ? (value['longtitude'] as num).toDouble()
+        : defaultCoordinates?.$2 ?? _ticketLocationMapCenter.longitude;
     return _Ticket(
       ticketId: value['TicketId'] as String,
       requestDate: requestDate,
-      building: value['building'] as String,
+      building: building,
+      latitude: latitude,
+      longitude: longitude,
       area: value['area'] as String?,
       floor: value['floor'] as String?,
       room: value['room'] as String?,
@@ -1763,6 +2250,7 @@ class _TicketDevice {
     required this.name,
     required this.description,
     required this.status,
+    required this.photoUrl,
     required this.nextFixDates,
     required this.technicianComments,
     required this.repairHistory,
@@ -1772,6 +2260,7 @@ class _TicketDevice {
   final String name;
   final String? description;
   final String status;
+  final String? photoUrl;
   final List<DateTime?> nextFixDates;
   final List<String?> technicianComments;
   final List<_RepairHistoryEntry> repairHistory;
@@ -1781,6 +2270,7 @@ class _TicketDevice {
         value['deviceid'] is! int ||
         value['device'] is! String ||
         value['status'] is! String ||
+        (value['photo_url'] != null && value['photo_url'] is! String) ||
         (value['discription'] != null && value['discription'] is! String) ||
         (value['next_fix_date'] != null && value['next_fix_date'] is! List)) {
       throw const FormatException('ข้อมูลอุปกรณ์ไม่ครบถ้วน');
@@ -1809,6 +2299,7 @@ class _TicketDevice {
       name: value['device'] as String,
       description: value['discription'] as String?,
       status: value['status'] as String,
+      photoUrl: value['photo_url'] as String?,
       nextFixDates: nextFixDates,
       technicianComments: technicianComments,
       repairHistory: repairHistory,

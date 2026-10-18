@@ -795,7 +795,12 @@ class _TechnicianManagerPageState extends State<TechnicianManagerPage> {
     _Technician technician,
     List<_DateRange> ranges,
   ) async {
-    final dateRanges = ranges
+    final orderedRanges = _sortDateRanges(ranges);
+    if (_hasOverlappingDateRanges(orderedRanges)) {
+      _showMessage('ช่วงวันที่เข้าใช้งานห้ามซ้ำหรือทับซ้อนกัน');
+      return;
+    }
+    final dateRanges = orderedRanges
         .map(
           (range) => {
             'start': _encodeDate(range.start),
@@ -960,7 +965,8 @@ class _TechnicianManagerPageState extends State<TechnicianManagerPage> {
   }
 
   Future<void> _editDateRanges(_Technician technician) async {
-    var ranges = technician.dateRanges.toList();
+    var ranges = _sortDateRanges(technician.dateRanges);
+    String? rangeError;
     final result = await showDialog<List<_DateRange>>(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
@@ -1004,6 +1010,8 @@ class _TechnicianManagerPageState extends State<TechnicianManagerPage> {
                                         ? date
                                         : ranges[i].end,
                                   );
+                                  ranges = _sortDateRanges(ranges);
+                                  rangeError = null;
                                 });
                               },
                               child: Text(
@@ -1033,6 +1041,8 @@ class _TechnicianManagerPageState extends State<TechnicianManagerPage> {
                                 if (date == null) return;
                                 setDialogState(() {
                                   ranges[i] = ranges[i].copyWith(end: date);
+                                  ranges = _sortDateRanges(ranges);
+                                  rangeError = null;
                                 });
                               },
                               child: Text(
@@ -1042,8 +1052,10 @@ class _TechnicianManagerPageState extends State<TechnicianManagerPage> {
                           ),
                           IconButton(
                             tooltip: 'ลบช่วงวันที่',
-                            onPressed: () =>
-                                setDialogState(() => ranges.removeAt(i)),
+                            onPressed: () => setDialogState(() {
+                              ranges.removeAt(i);
+                              rangeError = null;
+                            }),
                             icon: const Icon(Icons.delete_outline),
                           ),
                         ],
@@ -1053,10 +1065,22 @@ class _TechnicianManagerPageState extends State<TechnicianManagerPage> {
                     onPressed: () => setDialogState(() {
                       final today = _todayInBangkok();
                       ranges.add(_DateRange(start: today, end: today));
+                      ranges = _sortDateRanges(ranges);
+                      rangeError = null;
                     }),
                     icon: const Icon(Icons.add),
                     label: const Text('เพิ่มช่วงวันที่'),
                   ),
+                  if (rangeError != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Text(
+                        rangeError!,
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.error,
+                        ),
+                      ),
+                    ),
                 ],
               ),
             ),
@@ -1067,7 +1091,16 @@ class _TechnicianManagerPageState extends State<TechnicianManagerPage> {
               child: const Text('ยกเลิก'),
             ),
             FilledButton(
-              onPressed: () => Navigator.pop(dialogContext, ranges),
+              onPressed: () {
+                final orderedRanges = _sortDateRanges(ranges);
+                if (_hasOverlappingDateRanges(orderedRanges)) {
+                  setDialogState(() {
+                    rangeError = 'ช่วงวันที่เข้าใช้งานห้ามซ้ำหรือทับซ้อนกัน';
+                  });
+                  return;
+                }
+                Navigator.pop(dialogContext, orderedRanges);
+              },
               child: const Text('บันทึก'),
             ),
           ],
@@ -1075,6 +1108,24 @@ class _TechnicianManagerPageState extends State<TechnicianManagerPage> {
       ),
     );
     if (result != null) await _updateDateRanges(technician, result);
+  }
+
+  List<_DateRange> _sortDateRanges(List<_DateRange> ranges) {
+    final sorted = ranges.toList()
+      ..sort((first, second) {
+        final startOrder = first.start.compareTo(second.start);
+        return startOrder != 0 ? startOrder : first.end.compareTo(second.end);
+      });
+    return sorted;
+  }
+
+  bool _hasOverlappingDateRanges(List<_DateRange> sortedRanges) {
+    for (var index = 1; index < sortedRanges.length; index++) {
+      if (!sortedRanges[index].start.isAfter(sortedRanges[index - 1].end)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   String _encodeDate(DateTime date) =>

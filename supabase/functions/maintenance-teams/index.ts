@@ -108,6 +108,14 @@ function validateTechnicianUid(value: unknown): value is string {
   return typeof value === "string" && /^t_[0-9]{10}$/.test(value);
 }
 
+function bangkokDate(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const milliseconds = Date.parse(value);
+  return Number.isFinite(milliseconds)
+    ? new Date(milliseconds + 7 * 60 * 60 * 1000).toISOString().slice(0, 10)
+    : null;
+}
+
 function duplicateValueMessage(error: unknown): string | null {
   if (!isRecord(error) || error.code !== "23505") return null;
   const conflict = [
@@ -137,8 +145,7 @@ function validateDateRanges(
   value: unknown,
 ): { starts: string[]; ends: string[] } | null {
   if (!Array.isArray(value) || value.length > 48) return null;
-  const starts: string[] = [];
-  const ends: string[] = [];
+  const ranges: { start: string; end: string }[] = [];
   const today = new Date(Date.now() + 7 * 60 * 60 * 1000)
     .toISOString()
     .slice(0, 10);
@@ -161,10 +168,21 @@ function validateDateRanges(
     ) {
       return null;
     }
-    starts.push(`${range.start}T00:00:00+07:00`);
-    ends.push(`${range.end}T00:00:00+07:00`);
+    ranges.push({ start: range.start, end: range.end });
   }
-  return { starts, ends };
+  ranges.sort((first, second) =>
+      first.start.localeCompare(second.start) ||
+      first.end.localeCompare(second.end)
+    );
+  for (let index = 1; index < ranges.length; index++) {
+    if (ranges[index].start <= ranges[index - 1].end) {
+      return null;
+    }
+  }
+  return {
+    starts: ranges.map((range) => `${range.start}T00:00:00+07:00`),
+    ends: ranges.map((range) => `${range.end}T00:00:00+07:00`),
+  };
 }
 
 Deno.serve(async (request) => {
@@ -258,6 +276,61 @@ Deno.serve(async (request) => {
         })),
       );
       return jsonResponse(200, { technicians });
+    }
+
+    if (action === "list-eligible-teams") {
+      const { data, error } = await supabase
+        .from("Maintenance_Users")
+        .select("teamName, start_time, end_time")
+        .eq("status", true)
+        .order("teamName", { ascending: true });
+      if (error) throw error;
+
+      const today = new Date(Date.now() + 7 * 60 * 60 * 1000)
+        .toISOString()
+        .slice(0, 10);
+      const teamsByName = new Map<
+        string,
+        { name: string; periods: Map<string, { start: string; end: string }> }
+      >();
+      for (const technician of data ?? []) {
+        if (
+          typeof technician.teamName !== "string" ||
+          !Array.isArray(technician.start_time) ||
+          !Array.isArray(technician.end_time) ||
+          technician.start_time.length !== technician.end_time.length
+        ) {
+          throw new Error("Maintenance team date ranges are invalid.");
+        }
+        const normalizedName = technician.teamName.trim().toLowerCase();
+        if (!normalizedName) {
+          throw new Error("Maintenance team name is invalid.");
+        }
+        let team = teamsByName.get(normalizedName);
+        if (!team) {
+          team = { name: technician.teamName.trim(), periods: new Map() };
+          teamsByName.set(normalizedName, team);
+        }
+        for (let index = 0; index < technician.start_time.length; index++) {
+          const start = bangkokDate(technician.start_time[index]);
+          const end = bangkokDate(technician.end_time[index]);
+          if (!start || !end || start > end) {
+            throw new Error("Maintenance team date range is invalid.");
+          }
+          if (end >= today) team.periods.set(`${start}/${end}`, { start, end });
+        }
+      }
+
+      const teams = [...teamsByName.values()]
+        .filter((team) => team.periods.size > 0)
+        .map((team) => ({
+          name: team.name,
+          periods: [...team.periods.values()].sort((first, second) =>
+            first.start.localeCompare(second.start) ||
+            first.end.localeCompare(second.end)
+          ),
+        }));
+      return jsonResponse(200, { teams });
     }
 
     if (action === "list-technician-tickets") {
@@ -601,7 +674,9 @@ Deno.serve(async (request) => {
       if ("dateRanges" in payload) {
         const dateRanges = validateDateRanges(payload.dateRanges);
         if (!dateRanges) {
-          return jsonResponse(400, { error: "ช่วงวันที่ต้องเริ่มตั้งแต่วันนี้ และวันสิ้นสุดต้องไม่น้อยกว่าวันเริ่มต้น" });
+          return jsonResponse(400, {
+            error: "ช่วงวันที่ต้องเริ่มตั้งแต่วันนี้ วันสิ้นสุดต้องไม่น้อยกว่าวันเริ่มต้น และห้ามซ้ำหรือทับซ้อนกัน",
+          });
         }
         update.start_time = dateRanges.starts;
         update.end_time = dateRanges.ends;
