@@ -7,6 +7,7 @@ import 'package:image_picker/image_picker.dart';
 import '../auth/function_error_message.dart';
 import '../auth/temporary_account_session.dart';
 import '../database/connect.dart';
+import '../database/realtime_invalidation.dart';
 import 'profile_avatar_image.dart';
 
 class PersonalInfoPage extends StatefulWidget {
@@ -26,11 +27,13 @@ class _PersonalInfoPageState extends State<PersonalInfoPage> {
   bool _isSubmitting = false;
   bool _isEditing = false;
   bool _isLoadingAvatar = true;
+  int _avatarLoadVersion = 0;
   bool _isUploadingAvatar = false;
   late String _savedFirstName;
   String? _avatarUrl;
   String? _avatarErrorMessage;
   String? _errorMessage;
+  late final RealtimeRefreshBinding _realtimeRefresh;
 
   @override
   void initState() {
@@ -38,6 +41,14 @@ class _PersonalInfoPageState extends State<PersonalInfoPage> {
     final account = widget.temporaryAccount;
     _firstNameController = TextEditingController(
       text: account?.displayName ?? '',
+    );
+    _realtimeRefresh = RealtimeRefreshBinding(
+      domains: const {
+        RealtimeInvalidationDomain.accounts,
+        RealtimeInvalidationDomain.storage,
+      },
+      onRefresh: _refreshAvatar,
+      isMounted: () => mounted,
     );
     _saveCurrentValues();
     if (SupabaseConnection.isInitialized) {
@@ -49,8 +60,14 @@ class _PersonalInfoPageState extends State<PersonalInfoPage> {
 
   @override
   void dispose() {
+    _realtimeRefresh.dispose();
     _firstNameController.dispose();
     super.dispose();
+  }
+
+  Future<void> _refreshAvatar() async {
+    if (_isEditing || _isUploadingAvatar) return;
+    await _loadAvatar();
   }
 
   @override
@@ -285,6 +302,7 @@ class _PersonalInfoPageState extends State<PersonalInfoPage> {
   }
 
   Future<void> _loadAvatar() async {
+    final loadVersion = ++_avatarLoadVersion;
     setState(() {
       _isLoadingAvatar = true;
       _avatarErrorMessage = null;
@@ -296,16 +314,20 @@ class _PersonalInfoPageState extends State<PersonalInfoPage> {
       if (url != null && url is! String) {
         throw const FormatException('Invalid profile image response.');
       }
-      if (mounted) setState(() => _avatarUrl = url as String?);
+      if (mounted && loadVersion == _avatarLoadVersion) {
+        setState(() => _avatarUrl = url as String?);
+      }
     } on Exception catch (error) {
-      if (mounted) {
+      if (mounted && loadVersion == _avatarLoadVersion) {
         setState(
           () => _avatarErrorMessage =
               'โหลดรูปโปรไฟล์ไม่สำเร็จ: ${_errorFromResponse(error)}',
         );
       }
     } finally {
-      if (mounted) setState(() => _isLoadingAvatar = false);
+      if (mounted && loadVersion == _avatarLoadVersion) {
+        setState(() => _isLoadingAvatar = false);
+      }
     }
   }
 

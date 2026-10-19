@@ -707,7 +707,19 @@ Deno.serve(async (request) => {
         "delete_maintenance_technician",
         { p_technician_uid: uid },
       );
-      if (error) throw error;
+      if (error) {
+        if (
+          typeof error.message === "string" &&
+          error.message.includes("ACTIVE_JOBS_EXIST")
+        ) {
+          const cleanMessage = error.message.replace(
+            /^.*?ACTIVE_JOBS_EXIST:\s*/,
+            "",
+          );
+          return jsonResponse(400, { error: cleanMessage });
+        }
+        throw error;
+      }
       if (data !== true) {
         return jsonResponse(404, { error: "ไม่พบบัญชีช่างที่ต้องการลบ" });
       }

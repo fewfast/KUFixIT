@@ -31,6 +31,13 @@ void main() {
       ),
       findsOneWidget,
     );
+    expect(
+      find.descendant(
+        of: find.byType(Drawer),
+        matching: find.text('ประวัติการซ่อม'),
+      ),
+      findsNothing,
+    );
     expect(find.text('หน้าหลัก'), findsNothing);
 
     await tester.tap(find.widgetWithText(ListTile, 'งานที่ได้รับ'));
@@ -85,7 +92,7 @@ void main() {
     );
 
     expect(find.text('ค้นหา TicketId'), findsOneWidget);
-    expect(find.byTooltip('รีเฟรชรายการ'), findsOneWidget);
+    expect(find.byIcon(Icons.refresh), findsNothing);
     expect(find.text('ยังไม่ได้เชื่อมต่อ Supabase'), findsOneWidget);
 
     await tester.tap(find.byTooltip('เปิดเมนู'));
@@ -158,7 +165,7 @@ void main() {
       'คำร้องแจ้งซ่อม',
       'จัดการผู้ใช้',
       'ยืนยันการกระทำ',
-      'รายงาน',
+      'ประวัติ (Log)',
     ]) {
       expect(
         find.descendant(of: drawer, matching: find.text(label)),
@@ -176,7 +183,7 @@ void main() {
       'คำร้องแจ้งซ่อม',
       'จัดการผู้ใช้',
       'ยืนยันการกระทำ',
-      'รายงาน',
+      'ประวัติ (Log)',
     ]);
 
     await tester.tap(find.text('จัดการผู้ใช้'));
@@ -187,36 +194,55 @@ void main() {
     await tester.tap(find.text('ยืนยันการกระทำ'));
     await tester.pumpAndSettle();
     expect(find.text('ยืนยันการกระทำ'), findsOneWidget);
+    await tester.tap(find.byTooltip('เปิดเมนู'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('ประวัติ (Log)'));
+    await tester.pumpAndSettle();
+    expect(find.text('ประวัติการกระทำทั้งหมด (Activity Logs)'), findsOneWidget);
   });
 
-  testWidgets(
-    'Admin can open technician management between users and reports',
-    (tester) async {
-      await tester.pumpWidget(
-        const MaterialApp(home: Layout(roleOverride: 'Admin')),
-      );
+  testWidgets('Admin can open technician management before work review', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      const MaterialApp(home: Layout(roleOverride: 'Admin')),
+    );
 
-      await tester.tap(find.byTooltip('เปิดเมนู'));
-      await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('เปิดเมนู'));
+    await tester.pumpAndSettle();
 
-      final menuLabels = tester
-          .widgetList<ListTile>(find.byType(ListTile))
-          .map((tile) => (tile.title! as Text).data)
-          .toList();
-      expect(
-        menuLabels.indexOf('จัดการช่างเทคนิค'),
-        menuLabels.indexOf('จัดการผู้ใช้') + 1,
-      );
-      expect(
-        menuLabels.indexOf('จัดการช่างเทคนิค'),
-        lessThan(menuLabels.indexOf('รายงาน')),
-      );
+    final menuLabels = tester
+        .widgetList<ListTile>(find.byType(ListTile))
+        .map((tile) => (tile.title! as Text).data)
+        .toList();
+    expect(
+      menuLabels.indexOf('จัดการช่างเทคนิค'),
+      menuLabels.indexOf('จัดการผู้ใช้') + 1,
+    );
+    expect(
+      menuLabels.indexOf('จัดการช่างเทคนิค'),
+      lessThan(menuLabels.indexOf('ตรวจงานช่าง')),
+    );
 
-      await tester.tap(find.text('จัดการช่างเทคนิค'));
-      await tester.pumpAndSettle();
-      expect(find.text('จัดการบัญชีและข้อมูลช่างเทคนิค'), findsOneWidget);
-    },
-  );
+    await tester.tap(find.text('จัดการช่างเทคนิค'));
+    await tester.pumpAndSettle();
+    expect(find.text('จัดการบัญชีและข้อมูลช่างเทคนิค'), findsOneWidget);
+  });
+
+  testWidgets('Admin can open technician work review', (tester) async {
+    await tester.pumpWidget(
+      const MaterialApp(home: Layout(roleOverride: 'Admin')),
+    );
+
+    await tester.tap(find.byTooltip('เปิดเมนู'));
+    await tester.pumpAndSettle();
+    expect(find.text('ตรวจงานช่าง'), findsOneWidget);
+    await tester.tap(find.text('ตรวจงานช่าง'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('ตรวจงานช่าง'), findsOneWidget);
+    expect(find.text('กรุณาเข้าสู่ระบบด้วยบัญชีผู้ดูแลระบบ'), findsOneWidget);
+  });
 
   testWidgets('User can open their own repair request list', (tester) async {
     await tester.pumpWidget(
@@ -229,7 +255,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('รายการแจ้งซ่อมของฉัน'), findsOneWidget);
-    expect(find.byTooltip('รีเฟรชรายการ'), findsOneWidget);
+    expect(find.byIcon(Icons.refresh), findsNothing);
     expect(
       find.text('กรุณาเข้าสู่ระบบเพื่อดูรายการแจ้งซ่อมของคุณ'),
       findsOneWidget,
@@ -461,22 +487,18 @@ void main() {
     expect(find.text('ค้นหา TicketId'), findsOneWidget);
   });
 
-  testWidgets('database connection error page retries on button press', (
+  testWidgets('database connection error page retries automatically', (
     tester,
   ) async {
-    var retried = false;
     await tester.pumpWidget(
       MaterialApp(
-        home: DatabaseConnectionErrorPage(
-          errorMessage: 'Connection timed out',
-          onRetry: () => retried = true,
-          isRetrying: false,
-        ),
+        home: DatabaseConnectionErrorPage(errorMessage: 'Connection timed out'),
       ),
     );
 
     expect(find.text('Connection timed out'), findsOneWidget);
-    await tester.tap(find.text('ลองอีกครั้ง'));
-    expect(retried, isTrue);
+    expect(find.text('ระบบจะลองเชื่อมต่อใหม่โดยอัตโนมัติ'), findsOneWidget);
+    expect(find.byIcon(Icons.refresh), findsNothing);
+    expect(find.byType(FilledButton), findsNothing);
   });
 }

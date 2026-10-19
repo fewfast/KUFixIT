@@ -6,10 +6,18 @@ import 'package:latlong2/latlong.dart' as latlong;
 import '../auth/function_error_message.dart';
 import '../auth/temporary_account_session.dart';
 import '../database/connect.dart';
+import '../database/realtime_invalidation.dart';
 import 'building_locations.dart';
 
 class TechnicianManagerPage extends StatefulWidget {
-  const TechnicianManagerPage({super.key});
+  const TechnicianManagerPage({super.key, this.invokeOverride});
+
+  @visibleForTesting
+  final Future<Map<String, dynamic>> Function(
+    String action,
+    Map<String, Object?> body,
+  )?
+  invokeOverride;
 
   @override
   State<TechnicianManagerPage> createState() => _TechnicianManagerPageState();
@@ -21,13 +29,14 @@ class _TechnicianManagerPageState extends State<TechnicianManagerPage> {
   final _commentController = TextEditingController();
   List<_Technician> _technicians = [];
   bool _isLoadingTechnicians = true;
+  int _technicianLoadVersion = 0;
   bool _isCreatingTechnician = false;
   final Set<String> _deletingTechnicianUids = {};
   String? _techniciansError;
   String? _operationError;
   String _searchQuery = '';
   int _technicianPage = 0;
-  static const int _techniciansPerPage = 5;
+  static const int _techniciansPerPage = 1;
   String? _selectedTechnicianUid;
   List<_AssignedTicket> _assignedTickets = [];
   bool _isLoadingAssignedTickets = false;
@@ -35,15 +44,34 @@ class _TechnicianManagerPageState extends State<TechnicianManagerPage> {
   int _assignedTicketPage = 0;
   static const int _assignedTicketsPerPage = 5;
   String? _expandedAssignedTicketId;
+  late final RealtimeRefreshBinding _realtimeRefresh;
 
   @override
   void initState() {
     super.initState();
+    _realtimeRefresh = RealtimeRefreshBinding(
+      domains: const {
+        RealtimeInvalidationDomain.technicians,
+        RealtimeInvalidationDomain.tickets,
+        RealtimeInvalidationDomain.reports,
+      },
+      onRefresh: _refreshRealtimeData,
+      isMounted: () => mounted,
+    );
     _loadTechnicians();
+  }
+
+  Future<void> _refreshRealtimeData() async {
+    await _loadTechnicians();
+    final selectedTechnicianUid = _selectedTechnicianUid;
+    if (selectedTechnicianUid != null) {
+      await _selectTechnicianTickets(selectedTechnicianUid);
+    }
   }
 
   @override
   void dispose() {
+    _realtimeRefresh.dispose();
     _technicianNameController.dispose();
     _usernameController.dispose();
     _commentController.dispose();
@@ -54,6 +82,8 @@ class _TechnicianManagerPageState extends State<TechnicianManagerPage> {
     String action, [
     Map<String, Object?> body = const {},
   ]) async {
+    final invokeOverride = widget.invokeOverride;
+    if (invokeOverride != null) return invokeOverride(action, body);
     final account = TemporaryAccountSession.instance.account;
     if (account == null) {
       throw Exception('เซสชันหมดอายุ กรุณาเข้าสู่ระบบอีกครั้ง');
@@ -92,6 +122,7 @@ class _TechnicianManagerPageState extends State<TechnicianManagerPage> {
   }
 
   Future<void> _loadTechnicians() async {
+    final loadVersion = ++_technicianLoadVersion;
     setState(() {
       _isLoadingTechnicians = true;
       _techniciansError = null;
@@ -105,7 +136,7 @@ class _TechnicianManagerPageState extends State<TechnicianManagerPage> {
       final technicians = rawTechnicians
           .map(_Technician.fromJson)
           .toList(growable: false);
-      if (!mounted) return;
+      if (!mounted || loadVersion != _technicianLoadVersion) return;
       setState(() {
         _technicians = technicians;
         if (_selectedTechnicianUid != null &&
@@ -122,7 +153,7 @@ class _TechnicianManagerPageState extends State<TechnicianManagerPage> {
         _isLoadingTechnicians = false;
       });
     } catch (error) {
-      if (!mounted) return;
+      if (!mounted || loadVersion != _technicianLoadVersion) return;
       setState(() {
         _techniciansError = _errorText(error);
         _isLoadingTechnicians = false;
@@ -1152,6 +1183,13 @@ class _TechnicianManagerPageState extends State<TechnicianManagerPage> {
   }
 
   Future<void> _deleteTechnician(_Technician technician) async {
+    if (_selectedTechnicianUid == technician.uid && _assignedTickets.isNotEmpty) {
+      _showMessage(
+        'ไม่สามารถลบทีมช่างได้ เนื่องจากยังมีงานซ่อมที่ต้องทำอยู่ กรุณาย้ายงานให้ทีมอื่นหรือปิดงานให้เรียบร้อยก่อน',
+      );
+      return;
+    }
+
     final shouldDelete = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -1194,7 +1232,12 @@ class _TechnicianManagerPageState extends State<TechnicianManagerPage> {
       }
       _showMessage('ลบบัญชีช่างเรียบร้อยแล้ว');
     } catch (error) {
-      _showMessage('ลบบัญชีช่างไม่สำเร็จ: ${_errorText(error)}');
+      final msg = _errorText(error);
+      _showMessage(
+        msg.contains('ไม่สามารถลบทีมช่างได้')
+            ? msg
+            : 'ลบบัญชีช่างไม่สำเร็จ: $msg',
+      );
     } finally {
       if (mounted) {
         setState(() => _deletingTechnicianUids.remove(technician.uid));
@@ -1582,6 +1625,22 @@ class _TechnicianManagerPageState extends State<TechnicianManagerPage> {
 
   Widget _deleteTechnicianButton(_Technician technician) {
     final isDeleting = _deletingTechnicianUids.contains(technician.uid);
+    final hasActiveJobs =
+        _selectedTechnicianUid == technician.uid && _assignedTickets.isNotEmpty;
+
+    if (hasActiveJobs) {
+      return IconButton(
+        tooltip: 'ไม่สามารถลบได้เนื่องจากยังมีงานค้างอยู่',
+        onPressed: () {
+          _showMessage(
+            'ไม่สามารถลบทีมช่างได้ เนื่องจากยังมีงานซ่อมที่ต้องทำอยู่ กรุณาย้ายงานให้ทีมอื่นหรือปิดงานให้เรียบร้อยก่อน',
+          );
+        },
+        color: Theme.of(context).disabledColor,
+        icon: const Icon(Icons.delete_outline),
+      );
+    }
+
     return IconButton(
       tooltip: 'ลบบัญชีช่าง',
       onPressed: isDeleting ? null : () => _deleteTechnician(technician),
@@ -1744,7 +1803,7 @@ class _TechnicianManagerPageState extends State<TechnicianManagerPage> {
                       if (_isLoadingTechnicians)
                         const LinearProgressIndicator()
                       else if (_techniciansError != null)
-                        _errorMessage(_techniciansError!, _loadTechnicians)
+                        _errorMessage(_techniciansError!)
                       else
                         Column(
                           children: [
@@ -1752,8 +1811,9 @@ class _TechnicianManagerPageState extends State<TechnicianManagerPage> {
                             if (visibleTechnicians.isNotEmpty)
                               Padding(
                                 padding: const EdgeInsets.only(top: 12),
-                                child: Row(
-                                  mainAxisAlignment: MainAxisAlignment.center,
+                                child: Wrap(
+                                  alignment: WrapAlignment.center,
+                                  crossAxisAlignment: WrapCrossAlignment.center,
                                   children: [
                                     IconButton(
                                       tooltip: 'หน้าก่อนหน้า',
@@ -2097,10 +2157,7 @@ class _TechnicianManagerPageState extends State<TechnicianManagerPage> {
           const Center(child: CircularProgressIndicator()),
         ] else if (_assignedTicketsError != null) ...[
           const SizedBox(height: 8),
-          _errorMessage(
-            _assignedTicketsError!,
-            () => _selectTechnicianTickets(_selectedTechnicianUid),
-          ),
+          _errorMessage(_assignedTicketsError!),
         ] else if (_selectedTechnicianUid != null) ...[
           const SizedBox(height: 12),
           if (_assignedTickets.isEmpty)
@@ -2141,16 +2198,7 @@ class _TechnicianManagerPageState extends State<TechnicianManagerPage> {
     );
   }
 
-  Widget _errorMessage(String message, VoidCallback onRetry) => Row(
-    children: [
-      Expanded(child: Text(message)),
-      IconButton(
-        tooltip: 'ลองอีกครั้ง',
-        onPressed: onRetry,
-        icon: const Icon(Icons.refresh),
-      ),
-    ],
-  );
+  Widget _errorMessage(String message) => Text(message);
 }
 
 class _Technician {

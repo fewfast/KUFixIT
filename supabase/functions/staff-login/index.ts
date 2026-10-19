@@ -49,14 +49,17 @@ Deno.serve(async (request) => {
   } catch {
     return jsonResponse(400, { error: "Invalid JSON request body." });
   }
-  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+  if (
+    typeof payload !== "object" ||
+    payload === null ||
+    Array.isArray(payload)
+  ) {
     return jsonResponse(400, { error: "Invalid request body." });
   }
 
   const values = payload as Record<string, unknown>;
-  const username = typeof values.username === "string"
-    ? values.username.trim()
-    : "";
+  const username =
+    typeof values.username === "string" ? values.username.trim() : "";
   const password = typeof values.password === "string" ? values.password : "";
   if (
     !username ||
@@ -113,21 +116,17 @@ Deno.serve(async (request) => {
   const endtimeMilliseconds = endtime === null ? null : Date.parse(endtime);
   if (
     endtimeMilliseconds !== null &&
-    (!Number.isFinite(endtimeMilliseconds) ||
-      endtimeMilliseconds <= Date.now())
+    (!Number.isFinite(endtimeMilliseconds) || endtimeMilliseconds <= Date.now())
   ) {
     return jsonResponse(401, {
       error: "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง หรือบัญชีหมดอายุแล้ว",
     });
   }
-  const expiresAt = endtimeMilliseconds === null
-    ? undefined
-    : Math.floor(endtimeMilliseconds / 1000);
-  const session = await createTemporarySession(
-    user,
-    serviceRoleKey,
-    expiresAt,
-  );
+  const expiresAt =
+    endtimeMilliseconds === null
+      ? undefined
+      : Math.floor(endtimeMilliseconds / 1000);
+  const session = await createTemporarySession(user, serviceRoleKey, expiresAt);
   let uid: string | undefined;
   let accessUntil: number | undefined;
   let accessRangeStart: string | undefined;
@@ -139,7 +138,10 @@ Deno.serve(async (request) => {
       .eq("username", account.username)
       .maybeSingle();
     if (technicianError) {
-      console.error("Failed to load technician UID for sign-in.", technicianError);
+      console.error(
+        "Failed to load technician UID for sign-in.",
+        technicianError,
+      );
       return jsonResponse(500, { error: "Sign-in could not be completed." });
     }
     if (
@@ -150,9 +152,11 @@ Deno.serve(async (request) => {
       console.error("Technician account is missing a valid UID.");
       return jsonResponse(500, { error: "Sign-in could not be completed." });
     }
-    if (!Array.isArray(technician.start_time) ||
+    if (
+      !Array.isArray(technician.start_time) ||
       !Array.isArray(technician.end_time) ||
-      technician.start_time.length !== technician.end_time.length) {
+      technician.start_time.length !== technician.end_time.length
+    ) {
       console.error("Technician account has invalid date ranges.");
       return jsonResponse(500, { error: "Sign-in could not be completed." });
     }
@@ -165,14 +169,38 @@ Deno.serve(async (request) => {
       const startDate = bangkokDate(start);
       const endDate = bangkokDate(end);
       if (!startDate || !endDate || startDate > endDate) return null;
-      return { start: startDate, end: endDate };
+      return {
+        start: startDate,
+        end: endDate,
+        storedStart: start,
+        storedEnd: end,
+      };
     });
     if (ranges.some((range) => range === null)) {
       console.error("Technician account has an invalid date range value.");
       return jsonResponse(500, { error: "Sign-in could not be completed." });
     }
-    const activeRanges = ranges.filter(
-      (range) => range !== null && range.start <= today && range.end >= today,
+    const retainedRanges = ranges.filter(
+      (range) => range !== null && range.end >= today,
+    );
+    if (retainedRanges.length !== ranges.length) {
+      const { error: updateError } = await supabase
+        .from("Maintenance_Users")
+        .update({
+          start_time: retainedRanges.map((range) => range.storedStart),
+          end_time: retainedRanges.map((range) => range.storedEnd),
+        })
+        .eq("uid", technician.uid);
+      if (updateError) {
+        console.error(
+          "Failed to remove expired technician date ranges.",
+          updateError,
+        );
+        return jsonResponse(500, { error: "Sign-in could not be completed." });
+      }
+    }
+    const activeRanges = retainedRanges.filter(
+      (range) => range.start <= today && range.end >= today,
     );
     if (activeRanges.length === 0) {
       console.error("Technician authenticated without an active date range.");
@@ -187,7 +215,7 @@ Deno.serve(async (request) => {
     let extended = true;
     while (extended) {
       extended = false;
-      for (const range of ranges) {
+      for (const range of retainedRanges) {
         if (
           range !== null &&
           dateNumber(range.start) <= coveredThrough + 1 &&
@@ -202,15 +230,19 @@ Deno.serve(async (request) => {
       }
     }
     const coveredStartDate = new Date(coveredFrom * 24 * 60 * 60 * 1000);
-    const coveredEndDate = new Date(
-      coveredThrough * 24 * 60 * 60 * 1000,
-    );
+    const coveredEndDate = new Date(coveredThrough * 24 * 60 * 60 * 1000);
     accessRangeStart = `${coveredStartDate.getUTCFullYear()}-${String(
       coveredStartDate.getUTCMonth() + 1,
-    ).padStart(2, "0")}-${String(coveredStartDate.getUTCDate()).padStart(2, "0")}`;
+    ).padStart(
+      2,
+      "0",
+    )}-${String(coveredStartDate.getUTCDate()).padStart(2, "0")}`;
     const endDate = `${coveredEndDate.getUTCFullYear()}-${String(
       coveredEndDate.getUTCMonth() + 1,
-    ).padStart(2, "0")}-${String(coveredEndDate.getUTCDate()).padStart(2, "0")}`;
+    ).padStart(
+      2,
+      "0",
+    )}-${String(coveredEndDate.getUTCDate()).padStart(2, "0")}`;
     accessRangeEnd = endDate;
     accessUntil = Math.floor(endOfBangkokDate(endDate) / 1000);
     uid = technician.uid;

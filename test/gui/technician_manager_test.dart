@@ -75,4 +75,67 @@ void main() {
     expect(find.text('กรุณากรอกข้อมูลช่าง'), findsOneWidget);
     TemporaryAccountSession.instance.clear();
   });
+
+  testWidgets('technician manager fits a narrow phone viewport', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(320, 720);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    TemporaryAccountSession.instance.setFromResponse({
+      'id': 'admin1',
+      'username': 'admin1',
+      'firstname': 'Admin',
+      'lastname': '',
+      'isSystemAccount': true,
+      'role': 'Admin',
+      'accessToken': 'signed-token',
+      'expiresAt':
+          DateTime.now().add(const Duration(hours: 1)).millisecondsSinceEpoch ~/
+          1000,
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: TechnicianManagerPage(
+            invokeOverride: (action, body) async => {
+              if (action == 'list-technicians')
+                'technicians': [
+                  {
+                    'uid': 't_1234567890',
+                    'created_at': '2026-10-19T12:00:00Z',
+                    'teamName': 'ทีมทดสอบ 1',
+                    'username': 'tech_one',
+                    'comment': 'รายละเอียดทีมหนึ่ง',
+                    'password': 'test-only',
+                    'start_time': <String>[],
+                    'end_time': <String>[],
+                  },
+                  {
+                    'uid': 't_1234567891',
+                    'created_at': '2026-10-19T12:00:00Z',
+                    'teamName': 'ทีมทดสอบ 2',
+                    'username': 'tech_two',
+                    'comment': 'รายละเอียดทีมสอง',
+                    'password': 'test-only',
+                    'start_time': <String>[],
+                    'end_time': <String>[],
+                  },
+                ],
+            },
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(find.text('รายการช่างทั้งหมด'), findsOneWidget);
+    expect(find.text('ทีมทดสอบ 1'), findsOneWidget);
+    expect(find.text('ทีมทดสอบ 2'), findsNothing);
+    expect(find.textContaining('แสดง 1–1 จาก 2 ทีม'), findsOneWidget);
+    TemporaryAccountSession.instance.clear();
+  });
 }

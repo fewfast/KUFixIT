@@ -4,10 +4,12 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:flutter_map/flutter_map.dart' as flutter_map;
 import 'package:latlong2/latlong.dart' as latlong;
-
 import '../auth/temporary_account_session.dart';
 import '../database/connect.dart';
+import '../database/realtime_invalidation.dart';
 import 'building_locations.dart';
+import 'ticket_schedule_serialization.dart';
+import 'ticket_update_error_message.dart';
 
 const _ticketLocationMapCenter = latlong.LatLng(13.1209646, 100.9192182);
 
@@ -45,15 +47,27 @@ class _TicketMonitorState extends State<TicketMonitor> {
   };
   bool _isLoading = true;
   String? _errorMessage;
+  late final RealtimeRefreshBinding _realtimeRefresh;
 
   @override
   void initState() {
     super.initState();
+    _realtimeRefresh = RealtimeRefreshBinding(
+      domains: const {
+        RealtimeInvalidationDomain.tickets,
+        RealtimeInvalidationDomain.technicians,
+        RealtimeInvalidationDomain.reports,
+        RealtimeInvalidationDomain.storage,
+      },
+      onRefresh: _loadTickets,
+      isMounted: () => mounted,
+    );
     _loadTickets();
   }
 
   @override
   void dispose() {
+    _realtimeRefresh.dispose();
     _searchTimer?.cancel();
     _searchController.dispose();
     _ticketsScrollController.dispose();
@@ -134,7 +148,7 @@ class _TicketMonitorState extends State<TicketMonitor> {
       'area' => ticket.area,
       'floor' => ticket.floor,
       'room' => ticket.room,
-      'next_fix_date' => ticket.nextFixDate,
+      'next_fix_date' => ticket.nextFixDateStart,
       'status' => _statusOrder[ticket.status] ?? 99,
       _ => null,
     };
@@ -228,11 +242,6 @@ class _TicketMonitorState extends State<TicketMonitor> {
                   style: Theme.of(context).textTheme.headlineSmall,
                   textAlign: TextAlign.center,
                 ),
-              ),
-              IconButton(
-                tooltip: 'รีเฟรชรายการ',
-                onPressed: _isLoading ? null : _loadTickets,
-                icon: const Icon(Icons.refresh),
               ),
             ],
           ),
@@ -339,15 +348,7 @@ class _TicketMonitorState extends State<TicketMonitor> {
       return Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(error, textAlign: TextAlign.center),
-            const SizedBox(height: 8),
-            FilledButton.icon(
-              onPressed: _loadTickets,
-              icon: const Icon(Icons.refresh),
-              label: const Text('ลองอีกครั้ง'),
-            ),
-          ],
+          children: [Text(error, textAlign: TextAlign.center)],
         ),
       );
     }
@@ -592,8 +593,28 @@ class _ExpandableTicketRowState extends State<_ExpandableTicketRow> {
   String? _errorMessage;
   List<_TicketDevice> _devices = const [];
   List<String?> _technicians = const [];
+  List<String?> _repairComments = const [];
   List<DateTime?> _repairTimes = const [];
   List<DateTime?> _repairEndTimes = const [];
+  Map<int, List<_RepairHistoryPhoto>> _repairPhotos = const {};
+  late final RealtimeRefreshBinding _realtimeRefresh;
+
+  @override
+  void initState() {
+    super.initState();
+    _realtimeRefresh = RealtimeRefreshBinding(
+      domains: const {
+        RealtimeInvalidationDomain.tickets,
+        RealtimeInvalidationDomain.technicians,
+        RealtimeInvalidationDomain.reports,
+        RealtimeInvalidationDomain.storage,
+      },
+      onRefresh: () async {
+        if (_isExpanded) await _loadDevices();
+      },
+      isMounted: () => mounted,
+    );
+  }
 
   List<_RepairHistoryRow> get _repairHistory {
     final historyByIndex = <int, List<_RepairHistoryEntry>>{};
@@ -608,6 +629,11 @@ class _ExpandableTicketRowState extends State<_ExpandableTicketRow> {
         _repairTimes.length,
         _repairEndTimes.length,
         _technicians.length,
+        _repairComments.length,
+        _repairPhotos.keys.fold<int>(
+          0,
+          (length, index) => index + 1 > length ? index + 1 : length,
+        ),
       ].reduce((first, second) => first > second ? first : second),
       (length, index) => index + 1 > length ? index + 1 : length,
     );
@@ -624,6 +650,18 @@ class _ExpandableTicketRowState extends State<_ExpandableTicketRow> {
         endTime: index < _repairEndTimes.length ? _repairEndTimes[index] : null,
         repairedDevices: repairedDevices,
         technician: index < _technicians.length ? _technicians[index] : null,
+        comment:
+            index < _repairComments.length &&
+                _repairComments[index]?.trim().isNotEmpty == true
+            ? _repairComments[index]
+            : entries
+                  .map((entry) => entry.comment)
+                  .whereType<String>()
+                  .firstWhere(
+                    (comment) => comment.trim().isNotEmpty,
+                    orElse: () => '',
+                  ),
+        photos: _repairPhotos[index] ?? const [],
       );
     });
     rows.sort((first, second) {
@@ -705,8 +743,14 @@ class _ExpandableTicketRowState extends State<_ExpandableTicketRow> {
       _errorMessage = null;
     });
     try {
+      final account = TemporaryAccountSession.instance.account;
+      final token = account?.accessToken ??
+          SupabaseConnection.client.auth.currentSession?.accessToken;
       final response = await SupabaseConnection.client.functions.invoke(
         'list-public-tickets',
+        headers: token != null && token.isNotEmpty
+            ? {'Authorization': 'Bearer $token'}
+            : null,
         body: {'action': 'devices', 'ticketId': widget.ticket.ticketId},
       );
       final data = response.data;
@@ -717,7 +761,11 @@ class _ExpandableTicketRowState extends State<_ExpandableTicketRow> {
           (data['fix_history_time_start'] != null &&
               data['fix_history_time_start'] is! List) ||
           (data['fix_history_time_end'] != null &&
-              data['fix_history_time_end'] is! List)) {
+              data['fix_history_time_end'] is! List) ||
+          (data['technician_comment'] != null &&
+              data['technician_comment'] is! List) ||
+          (data['repair_history_photos'] != null &&
+              data['repair_history_photos'] is! List)) {
         throw const FormatException('รูปแบบข้อมูลอุปกรณ์ไม่ถูกต้อง');
       }
       final devices = (data['devices'] as List)
@@ -727,6 +775,10 @@ class _ExpandableTicketRowState extends State<_ExpandableTicketRow> {
         data['technician_history'],
         'technician_history',
       );
+      final repairComments = _stringList(
+        data['technician_comment'],
+        'technician_comment',
+      );
       final repairTimes = _dateTimeList(
         data['fix_history_time_start'],
         'fix_history_time_start',
@@ -735,12 +787,36 @@ class _ExpandableTicketRowState extends State<_ExpandableTicketRow> {
         data['fix_history_time_end'],
         'fix_history_time_end',
       );
+      final repairPhotos = <int, List<_RepairHistoryPhoto>>{};
+      for (final value in data['repair_history_photos'] as List? ?? const []) {
+        if (value is! Map ||
+            value['history_index'] is! int ||
+            (value['deviceid'] != null && value['deviceid'] is! int) ||
+            (value['row_index'] != null && value['row_index'] is! int) ||
+            (value['photo_url'] != null && value['photo_url'] is! String)) {
+          throw const FormatException('รูปแบบรูปประวัติการซ่อมไม่ถูกต้อง');
+        }
+        final photoUrl = value['photo_url'] as String?;
+        if (photoUrl != null && photoUrl.isNotEmpty) {
+          repairPhotos
+              .putIfAbsent(value['history_index'] as int, () => [])
+              .add(
+                _RepairHistoryPhoto(
+                  deviceId: value['deviceid'] as int?,
+                  rowIndex: value['row_index'] as int?,
+                  photoUrl: photoUrl,
+                ),
+              );
+        }
+      }
       if (!mounted) return;
       setState(() {
         _devices = devices;
         _technicians = technicians;
+        _repairComments = repairComments;
         _repairTimes = repairTimes;
         _repairEndTimes = repairEndTimes;
+        _repairPhotos = repairPhotos;
         _hasLoaded = true;
         _isLoading = false;
       });
@@ -800,9 +876,9 @@ class _ExpandableTicketRowState extends State<_ExpandableTicketRow> {
       );
     } on Exception catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('บันทึกข้อมูลคำร้องไม่สำเร็จ: $error')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(ticketUpdateErrorMessage(error))));
     }
   }
 
@@ -893,13 +969,15 @@ class _ExpandableTicketRowState extends State<_ExpandableTicketRow> {
                               vertical: 6,
                             ),
                             decoration: BoxDecoration(
-                              color: colors.secondaryContainer,
+                              color: _ticketStatusColor(
+                                widget.ticket.status,
+                              ).withValues(alpha: 0.14),
                               borderRadius: BorderRadius.circular(20),
                             ),
                             child: Text(
-                              widget.ticket.status,
+                              _ticketStatusLabel(widget.ticket.status),
                               style: TextStyle(
-                                color: colors.onSecondaryContainer,
+                                color: _ticketStatusColor(widget.ticket.status),
                                 fontSize: 12,
                                 fontWeight: FontWeight.w600,
                               ),
@@ -965,14 +1043,7 @@ class _ExpandableTicketRowState extends State<_ExpandableTicketRow> {
             Wrap(
               crossAxisAlignment: WrapCrossAlignment.center,
               spacing: 12,
-              children: [
-                Text(error),
-                TextButton.icon(
-                  onPressed: _loadDevices,
-                  icon: const Icon(Icons.refresh),
-                  label: const Text('ลองอีกครั้ง'),
-                ),
-              ],
+              children: [Text(error)],
             ),
             colors,
           ),
@@ -1111,9 +1182,11 @@ class _ExpandableTicketRowState extends State<_ExpandableTicketRow> {
   }
 
   Map<int, TableColumnWidth> _historyColumnWidths(double width) => {
-    0: FixedColumnWidth(width * 0.22),
-    1: FixedColumnWidth(width * 0.43),
-    2: FixedColumnWidth(width * 0.35),
+    0: FixedColumnWidth(width * 0.20),
+    1: FixedColumnWidth(width * 0.17),
+    2: FixedColumnWidth(width * 0.23),
+    3: FixedColumnWidth(width * 0.25),
+    4: FixedColumnWidth(width * 0.15),
   };
 
   Widget _detailsTable({
@@ -1150,14 +1223,16 @@ class _ExpandableTicketRowState extends State<_ExpandableTicketRow> {
           color: colors.surfaceContainerLow,
           child: _detailsTable(
             columnWidths: _historyColumnWidths(constraints.maxWidth),
-            columnBreakpoints: const [0.22, 0.65],
+            columnBreakpoints: const [0.20, 0.37, 0.60, 0.85],
             rows: [
               TableRow(
                 children: [
                   for (final label in const [
-                    'ช่วงเวลาที่เข้าซ่อม',
-                    'สิ่งที่ซ่อมสำเร็จ',
-                    'ผู้รับผิดชอบงานซ่อม',
+                    'ช่วงเวลาที่ช่างทำงาน',
+                    'ชื่อทีมช่าง',
+                    'งานที่ซ่อมสำเร็จ',
+                    'Comment ช่าง',
+                    'รูปอุปกรณ์',
                   ])
                     _deviceCell(label, headings),
                 ],
@@ -1179,7 +1254,7 @@ class _ExpandableTicketRowState extends State<_ExpandableTicketRow> {
           color: colors.surfaceContainerLow,
           child: _detailsTable(
             columnWidths: _historyColumnWidths(constraints.maxWidth),
-            columnBreakpoints: const [0.22, 0.65],
+            columnBreakpoints: const [0.20, 0.37, 0.60, 0.85],
             rows: [
               TableRow(
                 children: [
@@ -1187,13 +1262,39 @@ class _ExpandableTicketRowState extends State<_ExpandableTicketRow> {
                     _formatRepairTimeRange(entry.startTime, entry.endTime),
                     values,
                   ),
+                  _deviceCell(entry.technician ?? '-', values),
                   _deviceCell(
                     entry.repairedDevices.isEmpty
-                        ? 'ไม่มี'
+                        ? 'ไม่มีอุปกรณ์ที่ซ่อมสำเร็จ'
                         : entry.repairedDevices,
                     values,
                   ),
-                  _deviceCell(entry.technician ?? '-', values),
+                  _deviceCell(
+                    entry.comment?.trim().isNotEmpty == true
+                        ? entry.comment!
+                        : '-',
+                    values,
+                  ),
+                  entry.photos.isNotEmpty
+                      ? Wrap(
+                          spacing: 4,
+                          children: [
+                            for (final photo in entry.photos)
+                              TextButton.icon(
+                                onPressed: () => _viewRepairHistoryPhoto(
+                                  context,
+                                  photo.photoUrl,
+                                ),
+                                icon: const Icon(Icons.image_outlined),
+                                label: Text(
+                                  photo.deviceId == null
+                                      ? 'ดูรูป'
+                                      : 'อุปกรณ์ ${photo.deviceId}',
+                                ),
+                              ),
+                          ],
+                        )
+                      : _deviceCell('-', values),
                 ],
               ),
             ],
@@ -1262,7 +1363,13 @@ class _ExpandableTicketRowState extends State<_ExpandableTicketRow> {
                   _deviceCell(device.deviceId.toString(), values),
                   _deviceCell(device.name, values),
                   _deviceCell(device.description ?? '-', values),
-                  _deviceCell(device.status, values),
+                  _deviceCell(
+                    _ticketStatusLabel(device.status),
+                    values?.copyWith(
+                      color: _ticketStatusColor(device.status),
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
                 ],
               ),
             ],
@@ -1273,11 +1380,11 @@ class _ExpandableTicketRowState extends State<_ExpandableTicketRow> {
   }
 
   String _formatRepairTimeRange(DateTime? start, DateTime? end) {
-    if (start == null) return end == null ? '-' : _formatDateTime(end);
+    if (start == null) return end == null ? '-' : _formatDate(end);
     if (end == null || _isSameLocalDay(start, end)) {
-      return _formatDateTime(start);
+      return _formatDate(start);
     }
-    return '${_formatDateTime(start)} - ${_formatDateTime(end)}';
+    return '${_formatDate(start)} - ${_formatDate(end)}';
   }
 
   String _formatRepairDateRange(DateTime? start, DateTime? end) {
@@ -1301,14 +1408,6 @@ class _ExpandableTicketRowState extends State<_ExpandableTicketRow> {
     return '$day/$month/${localDateTime.year}';
   }
 
-  String _formatDateTime(DateTime dateTime) {
-    final localDateTime = dateTime.toLocal();
-    final day = localDateTime.day.toString().padLeft(2, '0');
-    final month = localDateTime.month.toString().padLeft(2, '0');
-    final hour = localDateTime.hour.toString().padLeft(2, '0');
-    final minute = localDateTime.minute.toString().padLeft(2, '0');
-    return '$day/$month/${localDateTime.year} $hour:$minute';
-  }
 
   Widget _deviceCell(String text, TextStyle? style) {
     return Padding(
@@ -1320,6 +1419,12 @@ class _ExpandableTicketRowState extends State<_ExpandableTicketRow> {
         overflow: TextOverflow.clip,
       ),
     );
+  }
+
+  @override
+  void dispose() {
+    _realtimeRefresh.dispose();
+    super.dispose();
   }
 }
 
@@ -1349,11 +1454,16 @@ class _AdminTicketEditDialogState extends State<_AdminTicketEditDialog> {
   TextEditingController? _teamSearchController;
   List<_MaintenanceTeam> _eligibleTeams = const [];
   bool _isLoadingTeams = true;
+  int _teamLoadVersion = 0;
   String? _teamLoadError;
+  late final RealtimeRefreshBinding _realtimeRefresh;
 
   bool get _canSelectTechnicianTeam => _status == 'pending';
   bool get _requiresTechnicianTeam =>
       _canSelectTechnicianTeam && _selectedTeam == null;
+  bool get _requiresPendingDevice =>
+      _status == 'pending' &&
+      !_deviceControllers.any((device) => device.status == 'pending');
 
   bool get _hasValidatingStatus =>
       _status == 'validating' ||
@@ -1362,6 +1472,13 @@ class _AdminTicketEditDialogState extends State<_AdminTicketEditDialog> {
   @override
   void initState() {
     super.initState();
+    _realtimeRefresh = RealtimeRefreshBinding(
+      domains: const {RealtimeInvalidationDomain.technicians},
+      onRefresh: () async {
+        if (_canSelectTechnicianTeam) await _loadEligibleTeams();
+      },
+      isMounted: () => mounted,
+    );
     final ticket = widget.ticket;
     _selectedBuilding = ticket.building == 'other'
         ? otherBuildingLabel
@@ -1390,7 +1507,7 @@ class _AdminTicketEditDialogState extends State<_AdminTicketEditDialog> {
     _roomController = TextEditingController(text: ticket.room ?? '');
     _status = _statuses.contains(ticket.status) ? ticket.status : 'validating';
     if (_selectedBuilding != null && _selectedBuilding != otherBuildingLabel) {
-      _areaController.text = ticket.building;
+      _areaController.text = 'อาคาร ${ticket.building}';
     }
     _deviceControllers = widget.devices
         .map(_DeviceEditControllers.fromDevice)
@@ -1400,6 +1517,7 @@ class _AdminTicketEditDialogState extends State<_AdminTicketEditDialog> {
 
   @override
   void dispose() {
+    _realtimeRefresh.dispose();
     _areaController.dispose();
     _floorController.dispose();
     _roomController.dispose();
@@ -1411,6 +1529,11 @@ class _AdminTicketEditDialogState extends State<_AdminTicketEditDialog> {
   }
 
   Future<void> _loadEligibleTeams() async {
+    final loadVersion = ++_teamLoadVersion;
+    setState(() {
+      _isLoadingTeams = true;
+      _teamLoadError = null;
+    });
     final account = TemporaryAccountSession.instance.account;
     if (account == null) {
       setState(() {
@@ -1440,7 +1563,7 @@ class _AdminTicketEditDialogState extends State<_AdminTicketEditDialog> {
       final teams = (data['teams'] as List)
           .map(_MaintenanceTeam.fromJson)
           .toList(growable: false);
-      if (!mounted) return;
+      if (!mounted || loadVersion != _teamLoadVersion) return;
       setState(() {
         _eligibleTeams = teams;
         _selectedTeam = teams
@@ -1451,7 +1574,7 @@ class _AdminTicketEditDialogState extends State<_AdminTicketEditDialog> {
         _teamLoadError = null;
       });
     } on Exception catch (error) {
-      if (!mounted) return;
+      if (!mounted || loadVersion != _teamLoadVersion) return;
       setState(() {
         _isLoadingTeams = false;
         _teamLoadError = 'โหลดทีมช่างไม่สำเร็จ: $error';
@@ -1545,7 +1668,7 @@ class _AdminTicketEditDialogState extends State<_AdminTicketEditDialog> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
-            'กรุณาเปลี่ยนสถานะคำร้องและอุปกรณ์ที่ยังเป็น validating',
+            'กรุณาเปลี่ยนสถานะคำร้องและอุปกรณ์ที่ยังเป็น “รอการยืนยัน”',
           ),
         ),
       );
@@ -1557,6 +1680,32 @@ class _AdminTicketEditDialogState extends State<_AdminTicketEditDialog> {
       );
       return;
     }
+    if (_canSelectTechnicianTeam && _selectedTeam != null) {
+      final period = _selectedTeam!.nextRepairPeriod;
+      final today = DateTime.now();
+      final todayEnd = DateTime(today.year, today.month, today.day, 23, 59, 59);
+
+      if (period.end.isBefore(todayEnd.subtract(const Duration(days: 1)))) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'ทีมช่างที่เลือกไม่มีช่วงเวลาปฏิบัติงานที่ใช้งานได้ในปัจจุบัน กรุณาเพิ่มเวลาทำงานให้ทีมช่างในหน้าจัดการช่างก่อน',
+            ),
+          ),
+        );
+        return;
+      }
+    }
+    if (_requiresPendingDevice) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'สถานะคำร้อง “รอซ่อม” ต้องมีอุปกรณ์สถานะ “รอซ่อม” อย่างน้อย 1 รายการ',
+          ),
+        ),
+      );
+      return;
+    }
     if (_selectedBuilding == otherBuildingLabel && !_otherCoordinatesSelected) {
       ScaffoldMessenger.of(
         context,
@@ -1565,8 +1714,8 @@ class _AdminTicketEditDialogState extends State<_AdminTicketEditDialog> {
     }
     if (!_formKey.currentState!.validate()) return;
     final devices = <Map<String, Object?>>[];
-    final selectedRepairDate = _canSelectTechnicianTeam
-        ? _selectedTeam?.nextRepairDate
+    final selectedRepairPeriod = _canSelectTechnicianTeam
+        ? _selectedTeam?.nextRepairPeriod
         : null;
     for (var index = 0; index < widget.devices.length; index++) {
       final device = widget.devices[index];
@@ -1576,9 +1725,11 @@ class _AdminTicketEditDialogState extends State<_AdminTicketEditDialog> {
         'device': fields.name.text.trim(),
         'discription': fields.description.text.trim(),
         'status': fields.status,
-        'next_fix_date': selectedRepairDate == null
-            ? <String>[]
-            : [selectedRepairDate.toIso8601String()],
+        'next_fix_date': fields.status == 'pending'
+            ? (selectedRepairPeriod != null
+                ? bangkokDateBoundaryIso8601(selectedRepairPeriod.end)
+                : device.nextFixDate?.toIso8601String())
+            : null,
         'technician_comment': fields.technicianComments.text
             .split('\n')
             .map((comment) => comment.trim())
@@ -1593,7 +1744,9 @@ class _AdminTicketEditDialogState extends State<_AdminTicketEditDialog> {
             : RegExp(r'\d+').firstMatch(_selectedBuilding!)!.group(0),
         'latitude': _latitude,
         'longtitude': _longitude,
-        'area': _areaController.text.trim(),
+        'area': _selectedBuilding == otherBuildingLabel
+            ? _areaController.text.trim()
+            : null,
         'floor': _floorController.text.trim().isEmpty
             ? null
             : _floorController.text.trim(),
@@ -1604,6 +1757,12 @@ class _AdminTicketEditDialogState extends State<_AdminTicketEditDialog> {
         'technician_team': _canSelectTechnicianTeam
             ? _selectedTeam?.name
             : null,
+        'next_fix_date_start': selectedRepairPeriod == null
+            ? null
+            : bangkokDateBoundaryIso8601(selectedRepairPeriod.start),
+        'next_fix_date_end': selectedRepairPeriod == null
+            ? null
+            : bangkokDateBoundaryIso8601(selectedRepairPeriod.end),
       },
       'devices': devices,
     });
@@ -1649,7 +1808,7 @@ class _AdminTicketEditDialogState extends State<_AdminTicketEditDialog> {
                         final buildingNumber = RegExp(
                           r'\d+',
                         ).firstMatch(building)!.group(0)!;
-                        _areaController.text = buildingNumber;
+                        _areaController.text = 'อาคาร $buildingNumber';
                         final coordinates = buildingCoordinates[buildingNumber];
                         if (coordinates != null) {
                           _latitude = coordinates.$1;
@@ -1721,7 +1880,7 @@ class _AdminTicketEditDialogState extends State<_AdminTicketEditDialog> {
                   decoration: InputDecoration(
                     labelText: 'บริเวณ',
                     helperText: _selectedBuilding != otherBuildingLabel
-                        ? 'ระบบใส่เลขอาคารให้อัตโนมัติ'
+                        ? 'ระบบใส่ชื่ออาคารและเลขอาคารให้อัตโนมัติ'
                         : 'ระบุบริเวณได้อิสระ',
                   ),
                   validator: (value) =>
@@ -1732,9 +1891,18 @@ class _AdminTicketEditDialogState extends State<_AdminTicketEditDialog> {
                 ),
                 TextFormField(
                   controller: _floorController,
-                  decoration: const InputDecoration(labelText: 'ชั้น'),
+                  decoration: InputDecoration(
+                    labelText: _selectedBuilding == otherBuildingLabel
+                        ? 'ชั้น'
+                        : 'ชั้น *',
+                  ),
                   validator: (value) {
                     final floor = value?.trim() ?? '';
+                    if (_selectedBuilding != null &&
+                        _selectedBuilding != otherBuildingLabel &&
+                        floor.isEmpty) {
+                      return 'กรุณาระบุชั้น';
+                    }
                     final normalizedFloor = floor.replaceFirst(
                       RegExp(r'^0+'),
                       '',
@@ -1769,12 +1937,29 @@ class _AdminTicketEditDialogState extends State<_AdminTicketEditDialog> {
                   decoration: const InputDecoration(labelText: 'สถานะคำร้อง'),
                   items: [
                     for (final status in _statuses)
-                      DropdownMenuItem(value: status, child: Text(status)),
+                      DropdownMenuItem(
+                        value: status,
+                        child: Text(
+                          _ticketStatusLabel(status),
+                          style: TextStyle(color: _ticketStatusColor(status)),
+                        ),
+                      ),
                   ],
                   onChanged: (value) {
                     if (value == null) return;
                     setState(() {
                       _status = value;
+                      if (value == 'rejected') {
+                        for (final device in _deviceControllers) {
+                          device.status = 'rejected';
+                        }
+                      } else if (value == 'finish') {
+                        for (final device in _deviceControllers) {
+                          if (!{'rejected', 'finish'}.contains(device.status)) {
+                            device.status = 'finish';
+                          }
+                        }
+                      }
                       if (!_canSelectTechnicianTeam) {
                         _selectedTeam = null;
                         _teamSearchController?.clear();
@@ -1856,8 +2041,37 @@ class _AdminTicketEditDialogState extends State<_AdminTicketEditDialog> {
                           itemCount: options.length,
                           itemBuilder: (context, index) {
                             final team = options.elementAt(index);
+                            final today = DateTime.now();
+                            final isExpired = team.nextRepairPeriod.end.isBefore(
+                              DateTime(today.year, today.month, today.day),
+                            );
                             return ListTile(
-                              title: Text(team.name),
+                              title: Row(
+                                children: [
+                                  Text(team.name),
+                                  if (isExpired) ...[
+                                    const SizedBox(width: 8),
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 6,
+                                        vertical: 2,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: Colors.red.shade100,
+                                        borderRadius: BorderRadius.circular(4),
+                                      ),
+                                      child: Text(
+                                        'หมดเวลาปฏิบัติงาน',
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          color: Colors.red.shade800,
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ],
+                              ),
                               subtitle: Text(team.periodSummary),
                               onTap: () => onSelected(team),
                             );
@@ -1870,21 +2084,7 @@ class _AdminTicketEditDialogState extends State<_AdminTicketEditDialog> {
                 if (_teamLoadError case final error?)
                   Padding(
                     padding: const EdgeInsets.only(top: 8),
-                    child: Row(
-                      children: [
-                        Expanded(child: Text(error)),
-                        TextButton(
-                          onPressed: () {
-                            setState(() {
-                              _isLoadingTeams = true;
-                              _teamLoadError = null;
-                            });
-                            unawaited(_loadEligibleTeams());
-                          },
-                          child: const Text('ลองอีกครั้ง'),
-                        ),
-                      ],
-                    ),
+                    child: Row(children: [Expanded(child: Text(error))]),
                   ),
                 if (_requiresTechnicianTeam && _teamLoadError == null)
                   const Padding(
@@ -1892,7 +2092,7 @@ class _AdminTicketEditDialogState extends State<_AdminTicketEditDialog> {
                     child: Align(
                       alignment: Alignment.centerLeft,
                       child: Text(
-                        'กรุณาเลือกทีมช่างก่อนบันทึกคำร้องสถานะ pending',
+                        'กรุณาเลือกทีมช่างก่อนบันทึกคำร้องสถานะ “รอซ่อม”',
                         style: TextStyle(color: Colors.red),
                       ),
                     ),
@@ -1904,6 +2104,14 @@ class _AdminTicketEditDialogState extends State<_AdminTicketEditDialog> {
                 ),
                 for (var index = 0; index < widget.devices.length; index++)
                   _buildDeviceFields(index),
+                if (_requiresPendingDevice)
+                  const Padding(
+                    padding: EdgeInsets.only(top: 12),
+                    child: Text(
+                      'สถานะคำร้อง “รอซ่อม” ต้องมีอุปกรณ์สถานะ “รอซ่อม” อย่างน้อย 1 รายการ',
+                      style: TextStyle(color: Colors.red),
+                    ),
+                  ),
               ],
             ),
           ),
@@ -1915,7 +2123,10 @@ class _AdminTicketEditDialogState extends State<_AdminTicketEditDialog> {
           child: const Text('ยกเลิก'),
         ),
         FilledButton.icon(
-          onPressed: _hasValidatingStatus || _requiresTechnicianTeam
+          onPressed:
+              _hasValidatingStatus ||
+                  _requiresTechnicianTeam ||
+                  _requiresPendingDevice
               ? null
               : _save,
           icon: const Icon(Icons.save_outlined),
@@ -1963,22 +2174,37 @@ class _AdminTicketEditDialogState extends State<_AdminTicketEditDialog> {
           maxLines: 2,
         ),
         DropdownButtonFormField<String>(
-          initialValue: _deviceStatuses.contains(fields.status)
+          key: ValueKey('${device.deviceId}-${fields.status}'),
+          initialValue: _allowedDeviceStatuses.contains(fields.status)
               ? fields.status
               : null,
           decoration: const InputDecoration(labelText: 'สถานะอุปกรณ์'),
           items: [
-            for (final status in _deviceStatuses)
-              DropdownMenuItem(value: status, child: Text(status)),
+            for (final status in _allowedDeviceStatuses)
+              DropdownMenuItem(
+                value: status,
+                child: Text(
+                  _ticketStatusLabel(status),
+                  style: TextStyle(color: _ticketStatusColor(status)),
+                ),
+              ),
           ],
-          onChanged: (value) {
-            if (value != null) setState(() => fields.status = value);
-          },
+          onChanged: _status == 'rejected'
+              ? null
+              : (value) {
+                  if (value != null) setState(() => fields.status = value);
+                },
           validator: (value) => value == null ? 'กรุณาเลือกสถานะอุปกรณ์' : null,
         ),
       ],
     );
   }
+
+  List<String> get _allowedDeviceStatuses => switch (_status) {
+    'rejected' => const ['rejected'],
+    'finish' => const ['rejected', 'finish'],
+    _ => _deviceStatuses,
+  };
 
   Future<void> _viewDevicePhoto(_TicketDevice device, String photoUrl) {
     return showDialog<void>(
@@ -2011,6 +2237,37 @@ class _AdminTicketEditDialogState extends State<_AdminTicketEditDialog> {
       ),
     );
   }
+}
+
+Future<void> _viewRepairHistoryPhoto(BuildContext context, String photoUrl) {
+  return showDialog<void>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('รูปอุปกรณ์ที่ซ่อม'),
+      content: SizedBox(
+        width: 640,
+        height: 480,
+        child: InteractiveViewer(
+          child: Image.network(
+            photoUrl,
+            fit: BoxFit.contain,
+            errorBuilder: (context, error, stackTrace) => const Center(
+              child: Text('โหลดรูปไม่สำเร็จ กรุณาปิดแล้วลองใหม่'),
+            ),
+            loadingBuilder: (context, child, progress) => progress == null
+                ? child
+                : const Center(child: CircularProgressIndicator()),
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('ปิด'),
+        ),
+      ],
+    ),
+  );
 }
 
 class _DeviceEditControllers {
@@ -2048,6 +2305,24 @@ class _DeviceEditControllers {
 
 const _deviceStatuses = ['pending', 'rejected', 'finish'];
 
+String _ticketStatusLabel(String status) => switch (status) {
+  'validating' => 'รอการยืนยัน',
+  'pending' => 'รอซ่อม',
+  'rejected' => 'ปฏิเสธการซ่อม',
+  'cancel' => 'ยกเลิก',
+  'finish' => 'ซ่อมเสร็จสิ้น',
+  _ => status,
+};
+
+Color _ticketStatusColor(String status) => switch (status) {
+  'validating' => Colors.blue.shade700,
+  'pending' => Colors.amber.shade800,
+  'rejected' => Colors.red.shade700,
+  'cancel' => Colors.deepOrange.shade700,
+  'finish' => Colors.green.shade700,
+  _ => Colors.grey.shade700,
+};
+
 class _MaintenanceTeam {
   const _MaintenanceTeam({required this.name, required this.periods});
 
@@ -2055,17 +2330,20 @@ class _MaintenanceTeam {
   final List<_MaintenanceAccessPeriod> periods;
 
   String get periodSummary {
-    final period = periods.first;
+    final period = nextRepairPeriod;
     return '${DateFormat('dd/MM/yyyy').format(period.start)} - '
         '${DateFormat('dd/MM/yyyy').format(period.end)} '
         '(${period.remainingText})';
   }
 
-  DateTime get nextRepairDate {
+  _MaintenanceAccessPeriod get nextRepairPeriod {
     final period = periods.first;
     final today = DateTime.now();
     final todayStart = DateTime(today.year, today.month, today.day);
-    return period.start.isBefore(todayStart) ? todayStart : period.start;
+    return _MaintenanceAccessPeriod(
+      start: period.start.isBefore(todayStart) ? todayStart : period.start,
+      end: period.end,
+    );
   }
 
   factory _MaintenanceTeam.fromJson(dynamic value) {
@@ -2123,11 +2401,10 @@ class _Ticket {
     required this.area,
     required this.floor,
     required this.room,
-    required this.nextFixDate,
+    required this.nextFixDateStart,
+    required this.nextFixDateEnd,
     required this.status,
     required this.technicianTeam,
-    required this.repairTimeStarts,
-    required this.repairTimeEnds,
   });
 
   final String ticketId;
@@ -2138,38 +2415,16 @@ class _Ticket {
   final String? area;
   final String? floor;
   final String? room;
-  final DateTime? nextFixDate;
+  final DateTime? nextFixDateStart;
+  final DateTime? nextFixDateEnd;
   final String status;
   final String? technicianTeam;
-  final List<DateTime?> repairTimeStarts;
-  final List<DateTime?> repairTimeEnds;
-
-  List<_RepairTimeRange> get repairPeriods {
-    final length = repairTimeStarts.length > repairTimeEnds.length
-        ? repairTimeStarts.length
-        : repairTimeEnds.length;
-    return List.generate(
-      length,
-      (index) => _RepairTimeRange(
-        start: index < repairTimeStarts.length ? repairTimeStarts[index] : null,
-        end: index < repairTimeEnds.length ? repairTimeEnds[index] : null,
-      ),
-      growable: false,
-    );
-  }
 
   _RepairTimeRange? get upcomingRepairPeriod {
-    final now = DateTime.now();
-    _RepairTimeRange? nearestPeriod;
-    for (final period in repairPeriods) {
-      final end = period.end;
-      if (end == null || !end.isAfter(now)) continue;
-      final nearestEnd = nearestPeriod?.end;
-      if (nearestEnd == null || end.isBefore(nearestEnd)) {
-        nearestPeriod = period;
-      }
-    }
-    return nearestPeriod;
+    final start = nextFixDateStart;
+    final end = nextFixDateEnd;
+    if (start == null || end == null) return null;
+    return _RepairTimeRange(start: start, end: end);
   }
 
   factory _Ticket.fromJson(dynamic value) {
@@ -2185,19 +2440,27 @@ class _Ticket {
         (value['room'] != null && value['room'] is! String) ||
         (value['technician_team'] != null &&
             value['technician_team'] is! String) ||
-        (value['next_fix_date'] != null && value['next_fix_date'] is! String) ||
-        (value['fix_history_time_start'] != null &&
-            value['fix_history_time_start'] is! List) ||
-        (value['fix_history_time_end'] != null &&
-            value['fix_history_time_end'] is! List)) {
+        (value['next_fix_date_start'] != null &&
+            value['next_fix_date_start'] is! String) ||
+        (value['next_fix_date_end'] != null &&
+            value['next_fix_date_end'] is! String)) {
       throw const FormatException('ข้อมูล Ticket ไม่ครบถ้วน');
     }
-    final nextFixDateValue = value['next_fix_date'] as String?;
-    final nextFixDate = nextFixDateValue == null
+    final nextFixDateStartValue = value['next_fix_date_start'] as String?;
+    final nextFixDateEndValue = value['next_fix_date_end'] as String?;
+    final nextFixDateStart = nextFixDateStartValue == null
         ? null
-        : DateTime.tryParse(nextFixDateValue);
-    if (nextFixDateValue != null && nextFixDate == null) {
-      throw const FormatException('รูปแบบวันเข้าซ่อมไม่ถูกต้อง');
+        : DateTime.tryParse(nextFixDateStartValue);
+    final nextFixDateEnd = nextFixDateEndValue == null
+        ? null
+        : DateTime.tryParse(nextFixDateEndValue);
+    if ((nextFixDateStartValue != null && nextFixDateStart == null) ||
+        (nextFixDateEndValue != null && nextFixDateEnd == null) ||
+        (nextFixDateStart == null) != (nextFixDateEnd == null) ||
+        (nextFixDateStart != null &&
+            nextFixDateEnd != null &&
+            nextFixDateStart.isAfter(nextFixDateEnd))) {
+      throw const FormatException('รูปแบบช่วงวันเข้าซ่อมไม่ถูกต้อง');
     }
     final requestDateValue = value['request_date'] as String;
     final requestDate = DateTime.tryParse(requestDateValue);
@@ -2222,17 +2485,10 @@ class _Ticket {
       area: value['area'] as String?,
       floor: value['floor'] as String?,
       room: value['room'] as String?,
-      nextFixDate: nextFixDate,
+      nextFixDateStart: nextFixDateStart,
+      nextFixDateEnd: nextFixDateEnd,
       status: value['status'] as String,
       technicianTeam: value['technician_team'] as String?,
-      repairTimeStarts: _dateTimeList(
-        value['fix_history_time_start'],
-        'fix_history_time_start',
-      ),
-      repairTimeEnds: _dateTimeList(
-        value['fix_history_time_end'],
-        'fix_history_time_end',
-      ),
     );
   }
 }
@@ -2251,7 +2507,7 @@ class _TicketDevice {
     required this.description,
     required this.status,
     required this.photoUrl,
-    required this.nextFixDates,
+    required this.nextFixDate,
     required this.technicianComments,
     required this.repairHistory,
   });
@@ -2261,7 +2517,7 @@ class _TicketDevice {
   final String? description;
   final String status;
   final String? photoUrl;
-  final List<DateTime?> nextFixDates;
+  final DateTime? nextFixDate;
   final List<String?> technicianComments;
   final List<_RepairHistoryEntry> repairHistory;
 
@@ -2271,11 +2527,10 @@ class _TicketDevice {
         value['device'] is! String ||
         value['status'] is! String ||
         (value['photo_url'] != null && value['photo_url'] is! String) ||
-        (value['discription'] != null && value['discription'] is! String) ||
-        (value['next_fix_date'] != null && value['next_fix_date'] is! List)) {
+        (value['discription'] != null && value['discription'] is! String)) {
       throw const FormatException('ข้อมูลอุปกรณ์ไม่ครบถ้วน');
     }
-    final nextFixDates = _dateTimeList(value['next_fix_date'], 'next_fix_date');
+    final nextFixDate = _lastDateTime(value['next_fix_date'], 'next_fix_date');
     final technicianComments = _stringList(
       value['technician_comment'],
       'technician_comment',
@@ -2291,6 +2546,9 @@ class _TicketDevice {
         deviceName: value['device'] as String,
         index: index,
         progress: index < progress.length ? progress[index] : null,
+        comment: index < technicianComments.length
+            ? technicianComments[index]
+            : null,
       ),
       growable: false,
     );
@@ -2300,7 +2558,7 @@ class _TicketDevice {
       description: value['discription'] as String?,
       status: value['status'] as String,
       photoUrl: value['photo_url'] as String?,
-      nextFixDates: nextFixDates,
+      nextFixDate: nextFixDate,
       technicianComments: technicianComments,
       repairHistory: repairHistory,
     );
@@ -2312,11 +2570,13 @@ class _RepairHistoryEntry {
     required this.deviceName,
     required this.index,
     required this.progress,
+    required this.comment,
   });
 
   final String deviceName;
   final int index;
   final bool? progress;
+  final String? comment;
 }
 
 class _RepairHistoryRow {
@@ -2326,6 +2586,8 @@ class _RepairHistoryRow {
     required this.endTime,
     required this.repairedDevices,
     required this.technician,
+    required this.comment,
+    required this.photos,
   });
 
   final int index;
@@ -2333,6 +2595,20 @@ class _RepairHistoryRow {
   final DateTime? endTime;
   final String repairedDevices;
   final String? technician;
+  final String? comment;
+  final List<_RepairHistoryPhoto> photos;
+}
+
+class _RepairHistoryPhoto {
+  const _RepairHistoryPhoto({
+    required this.deviceId,
+    required this.rowIndex,
+    required this.photoUrl,
+  });
+
+  final int? deviceId;
+  final int? rowIndex;
+  final String photoUrl;
 }
 
 class _TicketTableHeaderDelegate extends SliverPersistentHeaderDelegate {
@@ -2391,6 +2667,23 @@ String _formatRequestDate(DateTime dateTime) {
   final day = localDateTime.day.toString().padLeft(2, '0');
   final month = localDateTime.month.toString().padLeft(2, '0');
   return '$day/$month/${localDateTime.year}';
+}
+
+DateTime? _lastDateTime(Object? value, String fieldName) {
+  if (value == null) return null;
+  final values = value is List ? value.reversed : [value];
+  for (final item in values) {
+    if (item == null) continue;
+    if (item is! String) {
+      throw FormatException('รูปแบบข้อมูล $fieldName ไม่ถูกต้อง');
+    }
+    final dateTime = DateTime.tryParse(item);
+    if (dateTime == null) {
+      throw FormatException('รูปแบบวันเวลาใน $fieldName ไม่ถูกต้อง');
+    }
+    return dateTime;
+  }
+  return null;
 }
 
 List<DateTime?> _dateTimeList(Object? value, String fieldName) {

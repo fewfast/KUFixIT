@@ -6,6 +6,7 @@ import 'package:intl/intl.dart';
 import '../auth/function_error_message.dart';
 import '../auth/temporary_account_session.dart';
 import '../database/connect.dart';
+import '../database/realtime_invalidation.dart';
 
 class SuperAcceptPage extends StatefulWidget {
   const SuperAcceptPage({super.key});
@@ -19,15 +20,27 @@ class _SuperAcceptPageState extends State<SuperAcceptPage> {
 
   List<_UserChangeRequest> _requests = [];
   int _pendingPage = 0;
-  int _resolvedPage = 0;
   bool _isLoading = true;
+  int _loadVersion = 0;
   String? _error;
   final Set<String> _resolvingRequestIds = {};
+  late final RealtimeRefreshBinding _realtimeRefresh;
 
   @override
   void initState() {
     super.initState();
+    _realtimeRefresh = RealtimeRefreshBinding(
+      domains: const {RealtimeInvalidationDomain.accounts},
+      onRefresh: _loadRequests,
+      isMounted: () => mounted,
+    );
     _loadRequests();
+  }
+
+  @override
+  void dispose() {
+    _realtimeRefresh.dispose();
+    super.dispose();
   }
 
   Future<Map<String, dynamic>> _invoke(
@@ -71,6 +84,7 @@ class _SuperAcceptPageState extends State<SuperAcceptPage> {
   }
 
   Future<void> _loadRequests() async {
+    final loadVersion = ++_loadVersion;
     setState(() {
       _isLoading = true;
       _error = null;
@@ -84,19 +98,17 @@ class _SuperAcceptPageState extends State<SuperAcceptPage> {
       final requests = rawRequests
           .map(_UserChangeRequest.fromJson)
           .toList(growable: false);
-      if (!mounted) return;
+      if (!mounted || loadVersion != _loadVersion) return;
       final pendingCount = requests
           .where((request) => request.status == 'pending')
           .length;
-      final resolvedCount = requests.length - pendingCount;
       setState(() {
         _requests = requests;
         _pendingPage = _clampPage(_pendingPage, pendingCount);
-        _resolvedPage = _clampPage(_resolvedPage, resolvedCount);
         _isLoading = false;
       });
     } catch (error) {
-      if (!mounted) return;
+      if (!mounted || loadVersion != _loadVersion) return;
       setState(() {
         _isLoading = false;
         _error = _errorText(error);
@@ -207,14 +219,8 @@ class _SuperAcceptPageState extends State<SuperAcceptPage> {
     final pending = _requests
         .where((request) => request.status == 'pending')
         .toList(growable: false);
-    final resolved = _requests
-        .where((request) => request.status != 'pending')
-        .toList(growable: false);
     final pendingPageItems = pending
         .skip(_pendingPage * _requestsPerPage)
-        .take(_requestsPerPage);
-    final resolvedPageItems = resolved
-        .skip(_resolvedPage * _requestsPerPage)
         .take(_requestsPerPage);
     return Padding(
       padding: const EdgeInsets.all(16),
@@ -229,11 +235,6 @@ class _SuperAcceptPageState extends State<SuperAcceptPage> {
                   style: Theme.of(context).textTheme.headlineSmall,
                 ),
               ),
-              IconButton(
-                tooltip: 'รีเฟรชคำขอยืนยัน',
-                onPressed: _isLoading ? null : _loadRequests,
-                icon: const Icon(Icons.refresh),
-              ),
             ],
           ),
           if (_isLoading)
@@ -243,14 +244,7 @@ class _SuperAcceptPageState extends State<SuperAcceptPage> {
               child: Center(
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(_error!, textAlign: TextAlign.center),
-                    const SizedBox(height: 12),
-                    OutlinedButton(
-                      onPressed: _loadRequests,
-                      child: const Text('ลองอีกครั้ง'),
-                    ),
-                  ],
+                  children: [Text(_error!, textAlign: TextAlign.center)],
                 ),
               ),
             )
@@ -280,23 +274,6 @@ class _SuperAcceptPageState extends State<SuperAcceptPage> {
                     onPageChanged: (page) =>
                         setState(() => _pendingPage = page),
                   ),
-                  if (resolved.isNotEmpty) ...[
-                    const SizedBox(height: 16),
-                    Text(
-                      'ดำเนินการแล้ว',
-                      style: Theme.of(context).textTheme.titleMedium,
-                    ),
-                    const SizedBox(height: 8),
-                    ...resolvedPageItems.map(
-                      (request) => _buildRequestCard(request, isPending: false),
-                    ),
-                    _buildPagination(
-                      itemCount: resolved.length,
-                      currentPage: _resolvedPage,
-                      onPageChanged: (page) =>
-                          setState(() => _resolvedPage = page),
-                    ),
-                  ],
                 ],
               ),
             ),

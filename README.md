@@ -19,6 +19,28 @@ client app. Protect tables with Supabase Row Level Security (RLS) policies.
 At startup, the app checks the Supabase Auth health endpoint and displays a
 retry page if the connection check fails.
 
+## Realtime refresh
+
+The app uses a private Supabase Broadcast channel for invalidation-only
+updates. Database triggers publish a constant marker, never ticket, user, or
+other row data. The Flutter pages then reload through their existing
+authorization-checked Edge Functions; Realtime does not grant access to app
+data. Migration `20261019000001_realtime_invalidation.sql` adds the `anon`
+select policy for this single private topic and statement-level triggers for
+the app tables, ticket tables, technician assignment tables, and Storage
+objects. Newly added tables or dynamic table-creation functions must also
+install the invalidation trigger.
+
+The `anon` role can subscribe to this one private topic with the app's public
+key. It can observe only that a database change occurred and when; the
+broadcast contains no row data, and the policy does not grant permission to
+publish or access application tables.
+
+Apply the migration before expecting cross-client updates. It has not been
+applied to the remote project. The current local migration history has
+conflicting/unreconciled versions, so inspect and reconcile that history before
+using `supabase db push`; do not push the pending migration set blindly.
+
 ## Registration and roles
 
 Registration and sign-in use Google OAuth through Supabase Auth. Registration
@@ -246,12 +268,13 @@ through ticket IDs using the `list-public-tickets` Edge Function, which returns
 the ticket ID, building, area, floor, room, status, and the ticket's shared
 request date. Expanding a ticket loads its equipment details from the child
 table named for that ticket ID. `request_date` records when the repair request
-was submitted; the child table's `next_fix_date` remains a `timestamptz[]`.
-The ticket list displays the latest value from that schedule array. Null repair
-dates display as not scheduled; null floor and room values display as
-unspecified. Migrations `20261013000002_ticket_next_fix_date_scalar.sql` and
-`20261013000003_request_date_and_next_fix_date_array.sql` preserve existing
-schedule values while converting the array to a scalar and back.
+was submitted; each child table stores one `next_fix_date` as a `timestamptz`.
+The ticket list displays the latest scheduled date across its devices. Null
+repair dates display as not scheduled; null floor and room values display as
+unspecified. Repair history records approved technician reports, their team
+access period, device successes, comments, and result photos. A ticket is
+automatically finished when no device is pending or validating and at least one
+device is finished; its device schedule dates are then cleared.
 
 Access the initialized client with `SupabaseConnection.client`, for example:
 

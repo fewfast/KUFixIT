@@ -1,51 +1,105 @@
-# Miscellaneous
-*.class
-*.log
-*.pyc
-*.swp
-.DS_Store
-.atom/
-.build/
-.buildlog/
-.history
-.svn/
-.swiftpm/
-migrate_working_dir/
+# ==============================================================================
+# KUFixIT - .gitignore (Flutter Web/Mobile + Supabase Edge Functions)
+# ==============================================================================
 
-# IntelliJ related
-*.iml
-*.ipr
-*.iws
-.idea/
-
-# The .vscode folder contains launch configuration and tasks you configure in
-# VS Code which you may wish to be included in version control, so this line
-# is commented out by default.
-#.vscode/
-
-# Flutter/Dart/Pub related
-**/doc/api/
-**/ios/Flutter/.last_build_id
+# ------------------------------------------------------------------------------
+# 1. Flutter & Dart Artifacts
+# ------------------------------------------------------------------------------
 .dart_tool/
+.flutter-plugins
 .flutter-plugins-dependencies
 .pub-cache/
 .pub/
 /build/
 /coverage/
+**/doc/api/
+**/ios/Flutter/.last_build_id
 
-# Local environment files
-.env
-.env.*
-!.env.example
-/ios/Flutter/MapsApiKey.xcconfig
-
-# Symbolication related
+# Symbolication & Obfuscation
 app.*.symbols
-
-# Obfuscation related
 app.*.map.json
 
-# Android Studio will place build artifacts here
+# ------------------------------------------------------------------------------
+# 2. Android Specifics
+# ------------------------------------------------------------------------------
+.gradle/
+**/android/.gradle/
+local.properties
+**/android/local.properties
+**/android/key.properties
 /android/app/debug
 /android/app/profile
 /android/app/release
+**/android/**/build/
+
+# Keystores & Private Signing Keys
+*.keystore
+*.jks
+
+# ------------------------------------------------------------------------------
+# 3. iOS & macOS Specifics
+# ------------------------------------------------------------------------------
+**/ios/Pods/
+**/ios/.symlinks/
+**/ios/Flutter/Flutter.framework
+**/ios/Flutter/Flutter.podspec
+**/ios/Flutter/Generated.xcconfig
+**/ios/Flutter/app.*.symbols
+**/ios/Flutter/MapsApiKey.xcconfig
+
+# ------------------------------------------------------------------------------
+# 4. Supabase, Node.js & Edge Functions
+# ------------------------------------------------------------------------------
+node_modules/
+**/node_modules/
+.deno/
+supabase/.temp/
+supabase/.branches/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ------------------------------------------------------------------------------
+# 5. Sensitive & Environment Variables
+# ------------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+
+# ------------------------------------------------------------------------------
+# 6. IDEs & Operating Systems
+# ------------------------------------------------------------------------------
+# IntelliJ / Android Studio
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Visual Studio Code (ignore everything except launch & tasks configs)
+.vscode/*
+!.vscode/launch.json
+!.vscode/tasks.json
+
+# OS-generated files & Editor swap files
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.class
+*.log
+*.pyc
+
+# ------------------------------------------------------------------------------
+# 7. Project Scratch & Temporary Artifacts
+# ------------------------------------------------------------------------------
+bugreport-*.zip
+*.tmp
+*.bak
+*.orig
+.atom/
+.build/
+.buildlog/
+.history/
+.svn/
+.swiftpm/
+migrate_working_dir/

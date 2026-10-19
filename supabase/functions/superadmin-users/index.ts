@@ -274,5 +274,78 @@ Deno.serve(async (request) => {
     return jsonResponse(200, { requestId, status: data });
   }
 
+  if (action === "list-activity-logs") {
+    if (claims.role !== "SuperAdmin") {
+      return jsonResponse(403, { error: "ต้องใช้บัญชี SuperAdmin" });
+    }
+
+    const page = Math.max(1, typeof payload.page === "number" ? Math.floor(payload.page) : 1);
+    const pageSize = Math.min(100, Math.max(1, typeof payload.pageSize === "number" ? Math.floor(payload.pageSize) : 5));
+    const search = typeof payload.search === "string" ? payload.search.trim() : "";
+    const actionType = typeof payload.actionType === "string" ? payload.actionType.trim() : "ALL";
+    const actorRole = typeof payload.actorRole === "string" ? payload.actorRole.trim() : "ALL";
+    const startDate = typeof payload.startDate === "string" ? payload.startDate.trim() : "";
+    const endDate = typeof payload.endDate === "string" ? payload.endDate.trim() : "";
+
+    let query = supabase
+      .from("activity_logs")
+      .select(
+        "id, actor_username, actor_role, actor_display_name, action_type, action_title, description, target_id, metadata, created_at",
+        { count: "exact" },
+      );
+
+    if (actorRole && actorRole !== "ALL") {
+      query = query.eq("actor_role", actorRole);
+    }
+
+    if (actionType && actionType !== "ALL") {
+      if (actionType.includes(",")) {
+        const types = actionType.split(",").map((s) => s.trim()).filter(Boolean);
+        query = query.in("action_type", types);
+      } else {
+        query = query.eq("action_type", actionType);
+      }
+    }
+
+    if (startDate) {
+      const startIso = startDate.includes("T") ? startDate : `${startDate}T00:00:00+07:00`;
+      query = query.gte("created_at", startIso);
+    }
+
+    if (endDate) {
+      const endIso = endDate.includes("T") ? endDate : `${endDate}T23:59:59.999+07:00`;
+      query = query.lte("created_at", endIso);
+    }
+
+    if (search) {
+      const pattern = `%${search}%`;
+      query = query.or(
+        `actor_username.ilike.${pattern},actor_display_name.ilike.${pattern},description.ilike.${pattern},target_id.ilike.${pattern},action_title.ilike.${pattern}`,
+      );
+    }
+
+    const from = (page - 1) * pageSize;
+    const to = from + pageSize - 1;
+
+    query = query.order("created_at", { ascending: false }).range(from, to);
+
+    const { data: logs, count, error } = await query;
+    if (error) {
+      console.error("Failed to list activity logs.", error);
+      return jsonResponse(500, { error: "ไม่สามารถโหลดข้อมูลประวัติการกระทำได้" });
+    }
+
+    const totalCount = count ?? 0;
+    const totalPages = Math.ceil(totalCount / pageSize);
+
+    return jsonResponse(200, {
+      logs: logs ?? [],
+      totalCount,
+      page,
+      pageSize,
+      totalPages,
+    });
+  }
+
   return jsonResponse(400, { error: "Unknown user management action." });
 });

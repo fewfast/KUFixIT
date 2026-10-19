@@ -1,16 +1,9 @@
 import 'package:flutter/material.dart';
 
 class DatabaseConnectionErrorPage extends StatelessWidget {
-  const DatabaseConnectionErrorPage({
-    required this.errorMessage,
-    required this.onRetry,
-    required this.isRetrying,
-    super.key,
-  });
+  const DatabaseConnectionErrorPage({required this.errorMessage, super.key});
 
   final String errorMessage;
-  final VoidCallback onRetry;
-  final bool isRetrying;
 
   @override
   Widget build(BuildContext context) {
@@ -44,17 +37,7 @@ class DatabaseConnectionErrorPage extends StatelessWidget {
                   style: TextStyle(color: colorScheme.error),
                 ),
                 const SizedBox(height: 24),
-                FilledButton.icon(
-                  onPressed: isRetrying ? null : onRetry,
-                  icon: isRetrying
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.refresh),
-                  label: Text(isRetrying ? 'กำลังลองใหม่...' : 'ลองอีกครั้ง'),
-                ),
+                const Text('ระบบจะลองเชื่อมต่อใหม่โดยอัตโนมัติ'),
               ],
             ),
           ),

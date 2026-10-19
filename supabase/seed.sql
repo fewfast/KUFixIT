@@ -41,7 +41,7 @@ begin
       status text not null default %L,
       fix_history_progress boolean[] default null,
       technician_comment text[] default null,
-      next_fix_date timestamptz[] default null
+      next_fix_date timestamptz default null
     )',
     demo_ticket_id,
     'validating'

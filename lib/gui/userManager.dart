@@ -6,9 +6,17 @@ import 'package:intl/intl.dart';
 import '../auth/function_error_message.dart';
 import '../auth/temporary_account_session.dart';
 import '../database/connect.dart';
+import '../database/realtime_invalidation.dart';
 
 class UserManagerPage extends StatefulWidget {
-  const UserManagerPage({super.key});
+  const UserManagerPage({super.key, this.invokeOverride});
+
+  @visibleForTesting
+  final Future<Map<String, dynamic>> Function(
+    String action,
+    Map<String, Object?> body,
+  )?
+  invokeOverride;
 
   @override
   State<UserManagerPage> createState() => _UserManagerPageState();
@@ -22,8 +30,10 @@ class _UserManagerPageState extends State<UserManagerPage> {
   Set<String> _pendingActions = {};
   int _currentPage = 0;
   bool _isLoading = true;
+  int _loadVersion = 0;
   String? _error;
   final Set<String> _submittingUids = {};
+  late final RealtimeRefreshBinding _realtimeRefresh;
 
   bool get _isSuperAdmin =>
       TemporaryAccountSession.instance.account?.role == 'SuperAdmin';
@@ -31,11 +41,22 @@ class _UserManagerPageState extends State<UserManagerPage> {
   @override
   void initState() {
     super.initState();
+    _realtimeRefresh = RealtimeRefreshBinding(
+      domains: const {RealtimeInvalidationDomain.accounts},
+      onRefresh: _refreshRealtimeData,
+      isMounted: () => mounted,
+    );
     _loadUsers();
+  }
+
+  Future<void> _refreshRealtimeData() async {
+    if (_users.any((user) => _changesFor(user).isNotEmpty)) return;
+    await _loadUsers(preservePage: true);
   }
 
   @override
   void dispose() {
+    _realtimeRefresh.dispose();
     _searchController.dispose();
     _disposeUsers(_users);
     super.dispose();
@@ -51,6 +72,8 @@ class _UserManagerPageState extends State<UserManagerPage> {
     String action, [
     Map<String, Object?> body = const {},
   ]) async {
+    final invokeOverride = widget.invokeOverride;
+    if (invokeOverride != null) return invokeOverride(action, body);
     final account = TemporaryAccountSession.instance.account;
     if (account == null ||
         (account.role != 'Admin' && account.role != 'SuperAdmin')) {
@@ -90,11 +113,12 @@ class _UserManagerPageState extends State<UserManagerPage> {
         : message;
   }
 
-  Future<void> _loadUsers() async {
+  Future<void> _loadUsers({bool preservePage = false}) async {
+    final loadVersion = ++_loadVersion;
     setState(() {
       _isLoading = true;
       _error = null;
-      _currentPage = 0;
+      if (!preservePage) _currentPage = 0;
     });
     try {
       final data = await _invoke('list-users');
@@ -106,7 +130,7 @@ class _UserManagerPageState extends State<UserManagerPage> {
       final pendingActions = _isSuperAdmin
           ? _pendingActionsFromResponse(await _invoke('list-requests'))
           : <String>{};
-      if (!mounted) {
+      if (!mounted || loadVersion != _loadVersion) {
         _disposeUsers(users);
         return;
       }
@@ -118,7 +142,7 @@ class _UserManagerPageState extends State<UserManagerPage> {
       });
       _disposeUsers(previousUsers);
     } catch (error) {
-      if (!mounted) return;
+      if (!mounted || loadVersion != _loadVersion) return;
       setState(() {
         _isLoading = false;
         _error = _errorText(error);
@@ -276,11 +300,6 @@ class _UserManagerPageState extends State<UserManagerPage> {
                   style: Theme.of(context).textTheme.headlineSmall,
                 ),
               ),
-              IconButton(
-                tooltip: 'รีเฟรชรายชื่อผู้ใช้',
-                onPressed: _isLoading ? null : _loadUsers,
-                icon: const Icon(Icons.refresh),
-              ),
             ],
           ),
           if (!_isSuperAdmin) ...[
@@ -305,14 +324,7 @@ class _UserManagerPageState extends State<UserManagerPage> {
               child: Center(
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(_error!, textAlign: TextAlign.center),
-                    const SizedBox(height: 12),
-                    OutlinedButton(
-                      onPressed: _loadUsers,
-                      child: const Text('ลองอีกครั้ง'),
-                    ),
-                  ],
+                  children: [Text(_error!, textAlign: TextAlign.center)],
                 ),
               ),
             )
@@ -322,6 +334,15 @@ class _UserManagerPageState extends State<UserManagerPage> {
             Expanded(
               child: LayoutBuilder(
                 builder: (context, constraints) {
+                  if (constraints.maxWidth < 760) {
+                    return ListView.separated(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      itemCount: pageUsers.length,
+                      separatorBuilder: (_, _) => const SizedBox(height: 8),
+                      itemBuilder: (context, index) =>
+                          _buildUserCard(pageUsers.elementAt(index)),
+                    );
+                  }
                   final minTableWidth = constraints.maxWidth < 900
                       ? (_isSuperAdmin ? 924.0 : 790.0)
                       : constraints.maxWidth;
@@ -571,7 +592,10 @@ class _UserManagerPageState extends State<UserManagerPage> {
           if (!_isLoading && _error == null)
             Padding(
               padding: const EdgeInsets.only(top: 8),
-              child: Row(
+              child: Wrap(
+                alignment: WrapAlignment.spaceBetween,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                runSpacing: 4,
                 children: [
                   Text(
                     users.isEmpty
@@ -580,7 +604,6 @@ class _UserManagerPageState extends State<UserManagerPage> {
                               '${(startIndex + _usersPerPage).clamp(0, users.length)} '
                               'จาก ${users.length} รายการ',
                   ),
-                  const Spacer(),
                   if (pageCount > 1) ...[
                     IconButton(
                       tooltip: 'หน้าก่อนหน้า',
@@ -607,6 +630,111 @@ class _UserManagerPageState extends State<UserManagerPage> {
   }
 
   bool changesAreEmpty(_ManagedUser user) => _changesFor(user).isEmpty;
+
+  Widget _buildUserCard(_ManagedUser user) {
+    final isSubmitting = _submittingUids.contains(user.uid);
+    final hasPendingAction = _hasPendingAction(user);
+    final supportedRoles = const {'User', 'Admin'};
+    final supportedStatuses = const {'active', 'unactive'};
+    return Card(
+      key: ValueKey('user-card-${user.uid}'),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              'UID: ${user.uid}',
+              style: Theme.of(context).textTheme.titleSmall,
+            ),
+            const SizedBox(height: 4),
+            Text('สร้างเมื่อ ${_formatCreatedAt(user.createdAt)}'),
+            const SizedBox(height: 10),
+            TextField(
+              controller: user.displayNameController,
+              decoration: const InputDecoration(
+                labelText: 'ชื่อที่แสดง',
+                isDense: true,
+                border: OutlineInputBorder(),
+              ),
+              onChanged: (_) => setState(() {}),
+            ),
+            if (_isSuperAdmin) ...[
+              const SizedBox(height: 8),
+              DropdownButtonFormField<String>(
+                key: ValueKey('${user.uid}-card-role-${user.role}'),
+                initialValue: supportedRoles.contains(user.role)
+                    ? user.role
+                    : null,
+                decoration: const InputDecoration(
+                  labelText: 'บทบาท',
+                  isDense: true,
+                ),
+                items: const [
+                  DropdownMenuItem(value: 'User', child: Text('User')),
+                  DropdownMenuItem(value: 'Admin', child: Text('Admin')),
+                ],
+                onChanged: (value) {
+                  if (value != null) setState(() => user.role = value);
+                },
+              ),
+            ],
+            const SizedBox(height: 8),
+            if (_isSuperAdmin)
+              DropdownButtonFormField<String>(
+                key: ValueKey('${user.uid}-card-status-${user.status}'),
+                initialValue: supportedStatuses.contains(user.status)
+                    ? user.status
+                    : null,
+                decoration: const InputDecoration(
+                  labelText: 'สถานะ',
+                  isDense: true,
+                ),
+                items: const [
+                  DropdownMenuItem(value: 'active', child: Text('active')),
+                  DropdownMenuItem(value: 'unactive', child: Text('unactive')),
+                ],
+                onChanged: (value) {
+                  if (value != null) setState(() => user.status = value);
+                },
+              )
+            else
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text('สถานะ: ${user.status}'),
+              ),
+            const SizedBox(height: 8),
+            Align(
+              alignment: Alignment.centerRight,
+              child: FilledButton.tonalIcon(
+                onPressed:
+                    isSubmitting ||
+                        changesAreEmpty(user) ||
+                        (_isSuperAdmin && hasPendingAction)
+                    ? null
+                    : () => _submitChange(user),
+                icon: isSubmitting
+                    ? const SizedBox.square(
+                        dimension: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : hasPendingAction
+                    ? const Icon(Icons.hourglass_top)
+                    : Icon(_isSuperAdmin ? Icons.send : Icons.save_outlined),
+                label: Text(
+                  _isSuperAdmin && hasPendingAction
+                      ? 'รออนุมัติ'
+                      : _isSuperAdmin
+                      ? 'ส่งยืนยัน'
+                      : 'บันทึก',
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 
   String _formatCreatedAt(String value) {
     try {

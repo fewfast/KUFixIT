@@ -2,6 +2,11 @@ import {
   createClient,
   type SupabaseClient,
 } from "https://esm.sh/@supabase/supabase-js@2";
+import {
+  accessPeriodContainsSchedule,
+  classifyAssignmentRpcFailure,
+  validatePendingTicketUpdate,
+} from "./admin_ticket_update_contract.ts";
 import { verifyTemporarySession } from "../_shared/credentials.ts";
 import { getSupabaseAdminKey } from "../_shared/supabase_admin_key.ts";
 
@@ -11,12 +16,21 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type, x-supabase-api-version",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
+const technicianWorkBucket = "technician-work-results";
 
 function jsonResponse(status: number, body: Record<string, unknown>) {
   return new Response(JSON.stringify(body), {
     status,
     headers: { ...corsHeaders, "Content-Type": "application/json" },
   });
+}
+
+async function expireOverdueTicketsSilently(supabase: SupabaseClient) {
+  try {
+    await supabase.rpc("check_and_expire_overdue_tickets");
+  } catch (error) {
+    console.error("Failed to run check_and_expire_overdue_tickets:", error);
+  }
 }
 
 const ticketStatusOrder: Record<string, number> = {
@@ -39,7 +53,8 @@ type TicketRow = {
   room: string | null;
   fix_history_time_start?: string[] | null;
   fix_history_time_end?: string[] | null;
-  next_fix_date?: string | null;
+  next_fix_date_start?: string | null;
+  next_fix_date_end?: string | null;
 };
 
 const ticketSortColumns = [
@@ -62,48 +77,34 @@ function sortTickets<T extends TicketRow>(
         (ticketStatusOrder[second.status] ?? Number.MAX_SAFE_INTEGER);
       if (!ascending) valueOrder *= -1;
     } else {
-      const firstValue = first[sortBy as keyof TicketRow];
-      const secondValue = second[sortBy as keyof TicketRow];
+      const firstValue = sortBy === "next_fix_date"
+        ? first.next_fix_date_start
+        : first[sortBy as keyof TicketRow];
+      const secondValue = sortBy === "next_fix_date"
+        ? second.next_fix_date_start
+        : second[sortBy as keyof TicketRow];
       if (firstValue == null && secondValue != null) return 1;
       if (firstValue != null && secondValue == null) return -1;
       if (firstValue == null || secondValue == null) {
         valueOrder = 0;
       } else if (sortBy === "request_date") {
-        valueOrder = (Date.parse(firstValue as string) -
-          Date.parse(secondValue as string)) * (ascending ? 1 : -1);
+        valueOrder =
+          (Date.parse(firstValue as string) -
+            Date.parse(secondValue as string)) *
+          (ascending ? 1 : -1);
       } else {
-        valueOrder = String(firstValue).localeCompare(String(secondValue), undefined, {
-          numeric: true,
-          sensitivity: "base",
-        }) * (ascending ? 1 : -1);
+        valueOrder =
+          String(firstValue).localeCompare(String(secondValue), undefined, {
+            numeric: true,
+            sensitivity: "base",
+          }) * (ascending ? 1 : -1);
       }
     }
     if (valueOrder !== 0) return valueOrder;
-    const dateOrder = Date.parse(second.request_date) -
-      Date.parse(first.request_date);
+    const dateOrder =
+      Date.parse(second.request_date) - Date.parse(first.request_date);
     return dateOrder || second.TicketId.localeCompare(first.TicketId);
   });
-}
-
-async function ticketNextFixDate(
-  supabase: SupabaseClient,
-  ticketId: string,
-): Promise<string | null> {
-  const { data: schedules, error } = await supabase
-    .from(ticketId)
-    .select("next_fix_date")
-    .not("next_fix_date", "is", null)
-    .order("deviceid", { ascending: true })
-    .limit(50);
-  if (error) {
-    console.error(`Failed to load schedule for ticket ${ticketId}.`, error);
-    throw new Error("Ticket schedules could not be loaded.");
-  }
-  const dates = (schedules ?? []).flatMap((row) =>
-    Array.isArray(row.next_fix_date) ? row.next_fix_date : []
-  );
-  const latestDate = dates.at(-1);
-  return typeof latestDate === "string" ? latestDate : null;
 }
 
 async function requesterUid(
@@ -133,8 +134,9 @@ async function requesterUid(
 
   if (/^(?:\d{10}|u_\d{10})$/.test(subject)) return subject;
   if (
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-      .test(subject)
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+      subject,
+    )
   ) {
     return null;
   }
@@ -145,10 +147,7 @@ async function requesterUid(
     .eq("google_auth_user_id", subject)
     .maybeSingle();
   if (error) throw error;
-  if (
-    !account ||
-    !["User", "Admin"].includes(String(account.role))
-  ) {
+  if (!account || !["User", "Admin"].includes(String(account.role))) {
     return null;
   }
   const uid = account.uid;
@@ -156,8 +155,7 @@ async function requesterUid(
     const value = String(uid);
     return /^\d{10}$/.test(value) ? value : null;
   }
-  return typeof uid === "string" &&
-      /^(?:\d{10}|u_\d{10})$/.test(uid)
+  return typeof uid === "string" && /^(?:\d{10}|u_\d{10})$/.test(uid)
     ? uid
     : null;
 }
@@ -176,15 +174,17 @@ async function isAdministrator(
     if (claims.username === claims.sub) {
       const { data: account, error } = await supabase
         .from("Systems_Users")
-        .select('role, endtime')
+        .select("role, endtime")
         .eq("Username", claims.sub)
         .maybeSingle();
       if (error) throw error;
-      return account != null &&
+      return (
+        account != null &&
         ["Admin", "SuperAdmin"].includes(String(account.role)) &&
         (account.endtime === null ||
           (typeof account.endtime === "string" &&
-            Date.parse(account.endtime) > Date.now()));
+            Date.parse(account.endtime) > Date.now()))
+      );
     }
 
     const { data: account, error } = await supabase
@@ -193,9 +193,11 @@ async function isAdministrator(
       .eq("google_auth_user_id", claims.sub)
       .maybeSingle();
     if (error) throw error;
-    return account != null &&
+    return (
+      account != null &&
       ["Admin", "SuperAdmin"].includes(String(account.role)) &&
-      account.status === "active";
+      account.status === "active"
+    );
   }
 
   const { data, error } = await supabase.auth.getUser(token);
@@ -212,9 +214,11 @@ async function isAdministrator(
     .eq("google_auth_user_id", data.user.id)
     .maybeSingle();
   if (accountError) throw accountError;
-  return account != null &&
+  return (
+    account != null &&
     ["Admin", "SuperAdmin"].includes(String(account.role)) &&
-    account.status === "active";
+    account.status === "active"
+  );
 }
 
 Deno.serve(async (request) => {
@@ -241,9 +245,8 @@ Deno.serve(async (request) => {
 
   const values = payload as Record<string, unknown>;
   const action = values.action;
-  const ticketId = typeof values.ticketId === "string"
-    ? values.ticketId.trim()
-    : "";
+  const ticketId =
+    typeof values.ticketId === "string" ? values.ticketId.trim() : "";
   const sortBy = values.sortBy ?? "status";
   const sortAscending = values.sortAscending ?? true;
   if (
@@ -255,7 +258,8 @@ Deno.serve(async (request) => {
   }
 
   if (action === "admin-tickets" || action === "admin-update-ticket") {
-    const token = request.headers.get("authorization")
+    const token = request.headers
+      .get("authorization")
       ?.match(/^Bearer\s+(.+)$/i)?.[1];
     const supabaseUrl = Deno.env.get("SUPABASE_URL");
     const serviceRoleKey = getSupabaseAdminKey();
@@ -264,18 +268,24 @@ Deno.serve(async (request) => {
       return jsonResponse(500, { error: "Ticket service is not configured." });
     }
     if (!token) {
-      return jsonResponse(401, { error: "Sign in with an administrator account." });
+      return jsonResponse(401, {
+        error: "Sign in with an administrator account.",
+      });
     }
     const supabase = createClient(supabaseUrl, serviceRoleKey, {
       auth: { autoRefreshToken: false, persistSession: false },
     });
     try {
-      if (!await isAdministrator(token, supabase, serviceRoleKey)) {
-        return jsonResponse(403, { error: "Administrator access is required." });
+      if (!(await isAdministrator(token, supabase, serviceRoleKey))) {
+        return jsonResponse(403, {
+          error: "Administrator access is required.",
+        });
       }
     } catch (error) {
       console.error("Failed to verify administrator access.", error);
-      return jsonResponse(500, { error: "Administrator access could not be verified." });
+      return jsonResponse(500, {
+        error: "Administrator access could not be verified.",
+      });
     }
 
     if (action === "admin-update-ticket") {
@@ -300,6 +310,8 @@ Deno.serve(async (request) => {
       const room = requestFields.room;
       const status = requestFields.status;
       const technicianTeam = requestFields.technician_team;
+      const nextFixStart = requestFields.next_fix_date_start;
+      const nextFixEnd = requestFields.next_fix_date_end;
       const validRequest =
         typeof building === "string" &&
         (building === "other" || /^\d{1,2}$/.test(building)) &&
@@ -312,31 +324,95 @@ Deno.serve(async (request) => {
         longtitude >= -180 &&
         longtitude <= 180 &&
         (area == null || typeof area === "string") &&
-        (building !== "other" || (typeof area === "string" && area.trim() !== "")) &&
+        (building !== "other" ||
+          (typeof area === "string" && area.trim() !== "")) &&
         (building === "other" || area == null || area === building) &&
         (floor == null ||
-          (typeof floor === "string" && /^\d+$/.test(floor) &&
+          (typeof floor === "string" &&
+            /^\d+$/.test(floor) &&
             floor.replace(/^0+/, "").length <= 2 &&
             Number(floor) <= 50)) &&
+        (building === "other" ||
+          (typeof floor === "string" && floor.trim() !== "")) &&
         (room == null ||
           (typeof room === "string" && /^[a-zA-Z0-9-]{1,8}$/.test(room))) &&
         typeof status === "string" &&
-        ["validating", "pending", "finish", "rejected", "cancel"].includes(status) &&
+        ["validating", "pending", "finish", "rejected", "cancel"].includes(
+          status,
+        ) &&
         (technicianTeam == null ||
           (typeof technicianTeam === "string" &&
             technicianTeam.trim() !== "" &&
-            technicianTeam.length <= 120)) &&
-        (status === "pending" || technicianTeam == null);
-      if (
-        status === "pending" &&
-        (typeof technicianTeam !== "string" || technicianTeam.trim() === "")
-      ) {
-        return jsonResponse(400, {
-          error: "A maintenance team is required for pending tickets.",
-        });
-      }
+            technicianTeam.length <= 120));
       if (!validRequest) {
         return jsonResponse(400, { error: "Invalid request fields." });
+      }
+      const devices = deviceData.map((value) => {
+        if (
+          typeof value !== "object" ||
+          value === null ||
+          Array.isArray(value)
+        ) {
+          return null;
+        }
+        const device = value as Record<string, unknown>;
+        if (
+          !Number.isSafeInteger(device.deviceid) ||
+          typeof device.device !== "string" ||
+          device.device.trim() === "" ||
+          device.device.length > 120 ||
+          (device.discription != null &&
+            typeof device.discription !== "string") ||
+          typeof device.status !== "string" ||
+          !["validating", "pending", "rejected", "finish"].includes(
+            device.status,
+          ) ||
+          (device.next_fix_date != null &&
+            (typeof device.next_fix_date !== "string" ||
+              !Number.isFinite(Date.parse(device.next_fix_date)))) ||
+          !Array.isArray(device.technician_comment) ||
+          device.technician_comment.length > 50 ||
+          !device.technician_comment.every(
+            (comment) =>
+              comment == null ||
+              (typeof comment === "string" && comment.length <= 1000),
+          )
+        ) {
+          return null;
+        }
+        return {
+          deviceid: device.deviceid as number,
+          device: device.device,
+          discription: device.discription as string | null,
+          status: device.status,
+          next_fix_date: device.next_fix_date as string | null,
+          technician_comment: device.technician_comment as (string | null)[],
+        };
+      });
+      if (devices.some((device) => device == null)) {
+        return jsonResponse(400, { error: "Invalid device update data." });
+      }
+      const assignmentValidationError = validatePendingTicketUpdate(
+        status,
+        technicianTeam,
+        nextFixStart,
+        nextFixEnd,
+        devices as NonNullable<(typeof devices)[number]>[],
+      );
+      if (assignmentValidationError === "team_required") {
+        return jsonResponse(400, {
+          error: "กรุณาเลือกทีมช่างก่อนบันทึกคำร้องสถานะรอซ่อม",
+        });
+      }
+      if (assignmentValidationError === "schedule_required_or_invalid") {
+        return jsonResponse(400, {
+          error: "กรุณากำหนดช่วงเวลาเริ่มและสิ้นสุดการซ่อมให้ถูกต้อง",
+        });
+      }
+      if (assignmentValidationError === "team_schedule_not_allowed") {
+        return jsonResponse(400, {
+          error: "เลือกทีมและช่วงเวลาซ่อมได้เฉพาะคำร้องสถานะรอซ่อม",
+        });
       }
 
       if (typeof technicianTeam === "string") {
@@ -346,8 +422,13 @@ Deno.serve(async (request) => {
           .eq("teamName", technicianTeam)
           .eq("status", true);
         if (teamAccountsError) {
-          console.error("Failed to validate the assigned maintenance team.", teamAccountsError);
-          return jsonResponse(500, { error: "Maintenance teams could not be checked." });
+          console.error(
+            "Failed to validate the assigned maintenance team.",
+            teamAccountsError,
+          );
+          return jsonResponse(500, {
+            error: "Maintenance teams could not be checked.",
+          });
         }
         const today = new Date(Date.now() + 7 * 60 * 60 * 1000)
           .toISOString()
@@ -381,86 +462,72 @@ Deno.serve(async (request) => {
         });
         if (!isEligible) {
           return jsonResponse(400, {
-            error: "The selected maintenance team has no current or upcoming access period.",
+            error:
+              "The selected maintenance team has no current or upcoming access period.",
+          });
+        }
+        const scheduleIsAllowed = (teamAccounts ?? []).some((technician) =>
+          accessPeriodContainsSchedule(
+            technician.start_time,
+            technician.end_time,
+            nextFixStart,
+            nextFixEnd,
+          )
+        );
+        if (!scheduleIsAllowed) {
+          return jsonResponse(400, {
+            error:
+              "ช่วงเวลาที่เลือกไม่อยู่ในสิทธิ์เข้าใช้งานของทีมช่าง กรุณาเลือกทีมและช่วงเวลาใหม่",
           });
         }
       }
 
-      const devices = deviceData.map((value) => {
-        if (typeof value !== "object" || value === null || Array.isArray(value)) {
-          return null;
-        }
-        const device = value as Record<string, unknown>;
-        if (
-          !Number.isSafeInteger(device.deviceid) ||
-          typeof device.device !== "string" ||
-          device.device.trim() === "" ||
-          device.device.length > 120 ||
-          (device.discription != null && typeof device.discription !== "string") ||
-          typeof device.status !== "string" ||
-          !["validating", "pending", "rejected", "finish"].includes(
-            device.status,
-          ) ||
-          (device.next_fix_date != null &&
-            (!Array.isArray(device.next_fix_date) ||
-              device.next_fix_date.length > 50 ||
-              !device.next_fix_date.every(
-                (date) => date == null ||
-                  (typeof date === "string" &&
-                    Number.isFinite(Date.parse(date))),
-              ))) ||
-          !Array.isArray(device.technician_comment) ||
-          device.technician_comment.length > 50 ||
-          !device.technician_comment.every(
-            (comment) => comment == null ||
-              (typeof comment === "string" && comment.length <= 1000),
-          )
-        ) {
-          return null;
-        }
-        return {
-          deviceid: device.deviceid as number,
-          device: device.device,
-          discription: device.discription as string | null,
-          status: device.status,
-          next_fix_date: device.next_fix_date as (string | null)[] | null,
-          technician_comment: device.technician_comment as (string | null)[],
-        };
-      });
-      if (devices.some((device) => device == null)) {
-        return jsonResponse(400, { error: "Invalid device update data." });
+      if (
+        status === "rejected" &&
+        devices.some((device) => device!.status !== "rejected")
+      ) {
+        return jsonResponse(400, {
+          error: "All devices must be rejected when the ticket is rejected.",
+        });
+      }
+      if (
+        status === "finish" &&
+        devices.some(
+          (device) => !["rejected", "finish"].includes(device!.status),
+        )
+      ) {
+        return jsonResponse(400, {
+          error:
+            "Devices must be rejected or finished when the ticket is finished.",
+        });
+      }
+      if (
+        status === "pending" &&
+        !devices.some((device) => device!.status === "pending")
+      ) {
+        return jsonResponse(400, {
+          error:
+            "At least one device must be pending when the ticket is pending.",
+        });
       }
       if (
         status === "validating" ||
         devices.some((device) => device!.status === "validating")
       ) {
         return jsonResponse(400, {
-          error: "The ticket and all devices must leave validating before they can be saved.",
+          error:
+            "The ticket and all devices must leave validating before they can be saved.",
         });
       }
       const deviceIds = devices.map((device) => device!.deviceid);
       if (new Set(deviceIds).size !== deviceIds.length) {
-        return jsonResponse(400, { error: "Duplicate device IDs are not allowed." });
-      }
-
-      const { data: existingDevices, error: existingDevicesError } = await supabase
-        .from(ticketId)
-        .select("deviceid")
-        .order("deviceid", { ascending: true });
-      if (existingDevicesError) {
-        console.error("Failed to validate ticket devices before update.", existingDevicesError);
-        return jsonResponse(500, { error: "Ticket devices could not be updated." });
-      }
-      const existingIds = (existingDevices ?? []).map((device) => device.deviceid);
-      if (
-        existingIds.length !== deviceIds.length ||
-        existingIds.some((id, index) => id !== [...deviceIds].sort((a, b) => a - b)[index])
-      ) {
-        return jsonResponse(400, { error: "The device list does not match this ticket." });
+        return jsonResponse(400, {
+          error: "Duplicate device IDs are not allowed.",
+        });
       }
 
       const { error: ticketUpdateError } = await supabase.rpc(
-        "admin_update_fixlist_and_assign_team",
+        "admin_update_ticket_assignment_atomic",
         {
           p_ticket_id: ticketId,
           p_building: building,
@@ -470,43 +537,34 @@ Deno.serve(async (request) => {
           p_floor: floor == null ? null : String(floor).trim(),
           p_room: room == null ? null : String(room).trim(),
           p_status: status,
-          p_technician_team: technicianTeam == null
-            ? null
-            : String(technicianTeam).trim(),
+          p_technician_team:
+            technicianTeam == null ? null : String(technicianTeam).trim(),
+          p_next_fix_date_start: nextFixStart ?? null,
+          p_next_fix_date_end: nextFixEnd ?? null,
+          p_devices: devices,
         },
       );
       if (ticketUpdateError) {
-        console.error(
-          "Failed to update repair request and synchronize team assignment.",
-          ticketUpdateError,
-        );
-        return jsonResponse(500, {
-          error: "Repair request and team assignment could not be updated.",
+        const failure = classifyAssignmentRpcFailure(ticketUpdateError);
+        const correlationId = crypto.randomUUID();
+        const errorCode = typeof ticketUpdateError.code === "string" &&
+            /^[A-Z0-9]{5,8}$/.test(ticketUpdateError.code)
+          ? ticketUpdateError.code
+          : "unknown";
+        console.error("admin_update_ticket_rpc_failed", {
+          category: failure.category,
+          errorCode,
+          correlationId,
         });
-      }
-      for (const device of devices) {
-        const { error } = await supabase
-          .from(ticketId)
-          .update({
-            device: device!.device.trim(),
-            discription: device!.discription?.trim() || null,
-            status: device!.status.trim(),
-            next_fix_date: device!.next_fix_date,
-            technician_comment: device!.technician_comment,
-          })
-          .eq("deviceid", device!.deviceid);
-        if (error) {
-          console.error(
-            `Failed to update device ${device!.deviceid} for ticket ${ticketId}.`,
-            error,
-          );
-          return jsonResponse(500, {
-            error: "A device could not be updated; some ticket changes may already have been saved.",
-          });
-        }
+        return jsonResponse(failure.status, {
+          error: failure.message,
+          correlationId,
+        });
       }
       return jsonResponse(200, { updated: true });
     }
+
+    await expireOverdueTicketsSilently(supabase);
 
     const page = values.page;
     const pageSize = values.pageSize;
@@ -523,40 +581,31 @@ Deno.serve(async (request) => {
     ) {
       return jsonResponse(400, { error: "Invalid ticket search or page." });
     }
+    const orderColumn = sortBy === "next_fix_date" ? "next_fix_date_start" : sortBy;
+    const offset = page * pageSize;
     const { data, count, error } = await supabase
       .from("FixList")
       .select(
-        "TicketId, building, latitude, longtitude, area, floor, room, status, request_date, technician_team, fix_history_time_start, fix_history_time_end",
+        "TicketId, building, latitude, longtitude, area, floor, room, status, request_date, technician_team, fix_history_time_start, fix_history_time_end, next_fix_date_start, next_fix_date_end",
         { count: "exact" },
       )
+      .ilike("TicketId", ticketId ? `%${ticketId}%` : "%")
+      .order(orderColumn, { ascending: sortAscending })
       .order("request_date", { ascending: false })
       .order("TicketId", { ascending: false })
-      .ilike("TicketId", ticketId ? `%${ticketId}%` : "%");
+      .range(offset, offset + pageSize - 1);
     if (error) {
       console.error("Failed to load admin repair requests.", error);
-      return jsonResponse(500, { error: "Repair requests could not be loaded." });
+      return jsonResponse(500, {
+        error: "Repair requests could not be loaded.",
+      });
     }
-    let tickets: TicketRow[] = data ?? [];
-    try {
-      tickets = await Promise.all(
-        tickets.map(async (ticket) => ({
-          ...ticket,
-          next_fix_date: await ticketNextFixDate(supabase, ticket.TicketId),
-        })),
-      );
-    } catch (error) {
-      console.error("Failed to load schedules for admin repair requests.", error);
-      return jsonResponse(500, { error: "Ticket schedules could not be loaded." });
-    }
-    const pageTickets = sortTickets(tickets, sortBy, sortAscending).slice(
-      page * pageSize,
-      (page + 1) * pageSize,
-    );
-    return jsonResponse(200, { tickets: pageTickets, total: count ?? 0 });
+    return jsonResponse(200, { tickets: data ?? [], total: count ?? 0 });
   }
 
   if (action === "my-tickets" || action === "cancel-request") {
-    const token = request.headers.get("authorization")
+    const token = request.headers
+      .get("authorization")
       ?.match(/^Bearer\s+(.+)$/i)?.[1];
     const supabaseUrl = Deno.env.get("SUPABASE_URL");
     const serviceRoleKey = getSupabaseAdminKey();
@@ -576,7 +625,9 @@ Deno.serve(async (request) => {
       requester = await requesterUid(token, supabase, serviceRoleKey);
     } catch (error) {
       console.error("Failed to verify repair request owner.", error);
-      return jsonResponse(500, { error: "Your requests could not be verified." });
+      return jsonResponse(500, {
+        error: "Your requests could not be verified.",
+      });
     }
     if (!requester) {
       return jsonResponse(401, { error: "A valid user account is required." });
@@ -596,15 +647,20 @@ Deno.serve(async (request) => {
         .maybeSingle();
       if (error) {
         console.error("Failed to cancel repair request.", error);
-        return jsonResponse(500, { error: "The repair request could not be cancelled." });
+        return jsonResponse(500, {
+          error: "The repair request could not be cancelled.",
+        });
       }
       if (!cancelledTicket) {
         return jsonResponse(409, {
-          error: "This request cannot be cancelled because it is no longer awaiting validation.",
+          error:
+            "This request cannot be cancelled because it is no longer awaiting validation.",
         });
       }
       return jsonResponse(200, { cancelled: true });
     }
+
+    await expireOverdueTicketsSilently(supabase);
 
     const page = values.page;
     const pageSize = values.pageSize;
@@ -622,61 +678,31 @@ Deno.serve(async (request) => {
       return jsonResponse(400, { error: "Invalid ticket search or page." });
     }
 
-    let query = supabase
-      .from("FixList")
-      .select(
-        "TicketId, building, area, floor, room, status, request_date, fix_history_time_start, fix_history_time_end",
-        { count: "exact" },
-      )
-      .eq("requester", requester)
-      .order("request_date", { ascending: false })
-      .order("TicketId", { ascending: false });
-    if (ticketId) query = query.ilike("TicketId", `%${ticketId}%`);
-
-    const { data, count, error } = await query;
-    if (error) {
-      console.error("Failed to load the requester's tickets.", error);
-      return jsonResponse(500, { error: "Your requests could not be loaded." });
-    }
-    let tickets: TicketRow[] = data ?? [];
-    if (sortBy === "next_fix_date") {
-      try {
-        tickets = await Promise.all(
-          tickets.map(async (ticket) => ({
-            ...ticket,
-            next_fix_date: await ticketNextFixDate(supabase, ticket.TicketId),
-          })),
-        );
-      } catch (error) {
-        console.error("Failed to load ticket schedules for sorting.", error);
-        return jsonResponse(500, {
-          error: "Ticket schedules could not be loaded.",
-        });
-      }
-    }
-    tickets = sortTickets(tickets, sortBy, sortAscending);
+    const orderColumn = sortBy === "next_fix_date" ? "next_fix_date_start" : sortBy;
     const offset = page * pageSize;
     if (!Number.isSafeInteger(offset)) {
       return jsonResponse(400, { error: "Invalid page." });
     }
-    const pageTickets = tickets.slice(offset, offset + pageSize);
-    const pageWithSchedules = await Promise.all(
-      pageTickets.map(async (ticket) => {
-        return {
-          ...ticket,
-          next_fix_date: sortBy === "next_fix_date"
-            ? ticket.next_fix_date ?? null
-            : await ticketNextFixDate(supabase, ticket.TicketId),
-        };
-      }),
-    ).catch((error: unknown) => {
-      console.error("Failed to load requester's ticket schedules.", error);
-      return null;
-    });
-    if (pageWithSchedules === null) {
-      return jsonResponse(500, { error: "Ticket schedules could not be loaded." });
+
+    let query = supabase
+      .from("FixList")
+      .select(
+        "TicketId, building, area, floor, room, status, request_date, fix_history_time_start, fix_history_time_end, next_fix_date_start, next_fix_date_end",
+        { count: "exact" },
+      )
+      .eq("requester", requester);
+    if (ticketId) query = query.ilike("TicketId", `%${ticketId}%`);
+
+    const { data, count, error } = await query
+      .order(orderColumn, { ascending: sortAscending })
+      .order("request_date", { ascending: false })
+      .order("TicketId", { ascending: false })
+      .range(offset, offset + pageSize - 1);
+    if (error) {
+      console.error("Failed to load the requester's tickets.", error);
+      return jsonResponse(500, { error: "Your requests could not be loaded." });
     }
-    return jsonResponse(200, { tickets: pageWithSchedules, total: count ?? 0 });
+    return jsonResponse(200, { tickets: data ?? [], total: count ?? 0 });
   }
 
   if (action === "devices") {
@@ -694,16 +720,22 @@ Deno.serve(async (request) => {
     const supabase = createClient(supabaseUrl, serviceRoleKey, {
       auth: { autoRefreshToken: false, persistSession: false },
     });
+    await expireOverdueTicketsSilently(supabase);
     const { data: ticket, error: ticketError } = await supabase
       .from("FixList")
       .select(
-        "TicketId, technician_history, fix_history_time_start, fix_history_time_end",
+        "TicketId, requester, technician_history, technician_comment, fix_history_time_start, fix_history_time_end, next_fix_date_start, next_fix_date_end",
       )
       .eq("TicketId", ticketId)
       .maybeSingle();
     if (ticketError) {
-      console.error("Failed to verify ticket before loading its devices.", ticketError);
-      return jsonResponse(500, { error: "Ticket devices could not be loaded." });
+      console.error(
+        "Failed to verify ticket before loading its devices.",
+        ticketError,
+      );
+      return jsonResponse(500, {
+        error: "Ticket devices could not be loaded.",
+      });
     }
     if (!ticket) {
       return jsonResponse(404, { error: "Ticket not found." });
@@ -717,17 +749,88 @@ Deno.serve(async (request) => {
       .order("deviceid", { ascending: true });
     if (devicesError) {
       console.error("Failed to load ticket devices.", devicesError);
-      return jsonResponse(500, { error: "Ticket devices could not be loaded." });
+      return jsonResponse(500, {
+        error: "Ticket devices could not be loaded.",
+      });
     }
-    const { data: signedPhotos, error: signedPhotosError } = await supabase
-      .storage
-      .from(ticketId)
-      .createSignedUrls(
+    const { data: historyReports, error: historyReportsError } = await supabase
+      .from("technician_work_reports")
+      .select("history_index, photo_path, device_results")
+      .eq("TicketId", ticketId)
+      .eq("status", "approved")
+      .not("history_index", "is", null)
+      .order("history_index", { ascending: true });
+    if (historyReportsError) {
+      console.error(
+        "Failed to load repair history reports.",
+        historyReportsError,
+      );
+      return jsonResponse(500, {
+        error: "Repair history could not be loaded.",
+      });
+    }
+    const historyPhotoReports: Array<{
+      history_index: number;
+      deviceid: number | null;
+      row_index: number | null;
+      photo_path: string;
+    }> = [];
+    for (const report of historyReports ?? []) {
+      if (typeof report.history_index !== "number") continue;
+      if (Array.isArray(report.device_results) && report.device_results.length > 0) {
+        for (const result of report.device_results) {
+          if (
+            result?.success === true &&
+            typeof result?.photo_path === "string" &&
+            typeof result.deviceid === "number" &&
+            typeof result.row_index === "number"
+          ) {
+            historyPhotoReports.push({
+              history_index: report.history_index,
+              deviceid: result.deviceid,
+              row_index: result.row_index,
+              photo_path: result.photo_path,
+            });
+          }
+        }
+      } else if (typeof report.photo_path === "string") {
+        historyPhotoReports.push({
+          history_index: report.history_index,
+          deviceid: null,
+          row_index: null,
+          photo_path: report.photo_path,
+        });
+      }
+    }
+    const { data: signedHistoryPhotos, error: signedHistoryPhotosError } =
+      historyPhotoReports.length === 0
+        ? { data: [], error: null }
+        : await supabase.storage.from(technicianWorkBucket).createSignedUrls(
+            historyPhotoReports.map((report) => report.photo_path),
+            300,
+          );
+    if (signedHistoryPhotosError) {
+      console.error(
+        "Failed to create signed URLs for repair history photos.",
+        signedHistoryPhotosError,
+      );
+      return jsonResponse(500, {
+        error: "Repair history photos could not be loaded.",
+      });
+    }
+    const historyPhotoUrls = new Map(
+      (signedHistoryPhotos ?? []).map((photo) => [photo.path, photo.signedUrl]),
+    );
+    const { data: signedPhotos, error: signedPhotosError } =
+      await supabase.storage.from(ticketId).createSignedUrls(
         (devices ?? []).map((device) => String(device.deviceid)),
         300,
       );
     if (signedPhotosError) {
-      console.error("Failed to create signed URLs for ticket photos.", signedPhotosError);
+      console.error(
+        "Failed to create signed URLs for ticket photos.",
+        signedPhotosError,
+      );
       return jsonResponse(500, { error: "Ticket photos could not be loaded." });
     }
     const photoUrls = new Map(
@@ -736,11 +839,21 @@ Deno.serve(async (request) => {
     return jsonResponse(200, {
       devices: (devices ?? []).map((device) => ({
         ...device,
+        next_fix_date: device.next_fix_date,
         photo_url: photoUrls.get(String(device.deviceid)) ?? null,
       })),
       technician_history: ticket.technician_history,
+      technician_comment: ticket.technician_comment,
       fix_history_time_start: ticket.fix_history_time_start,
       fix_history_time_end: ticket.fix_history_time_end,
+      next_fix_date_start: ticket.next_fix_date_start,
+      next_fix_date_end: ticket.next_fix_date_end,
+      repair_history_photos: historyPhotoReports.map((report) => ({
+        history_index: report.history_index,
+        deviceid: report.deviceid,
+        row_index: report.row_index,
+        photo_url: historyPhotoUrls.get(report.photo_path) ?? null,
+      })),
     });
   }
 
@@ -774,59 +887,25 @@ Deno.serve(async (request) => {
   const supabase = createClient(supabaseUrl, serviceRoleKey, {
     auth: { autoRefreshToken: false, persistSession: false },
   });
+  await expireOverdueTicketsSilently(supabase);
+  const orderColumn = sortBy === "next_fix_date" ? "next_fix_date_start" : sortBy;
   let query = supabase
     .from("FixList")
     .select(
-      "TicketId, building, area, floor, room, status, request_date, fix_history_time_start, fix_history_time_end",
+      "TicketId, building, area, floor, room, status, request_date, fix_history_time_start, fix_history_time_end, next_fix_date_start, next_fix_date_end",
       { count: "exact" },
-    )
-    .order("request_date", { ascending: false })
-    .order("TicketId", { ascending: false });
+    );
   if (ticketId) query = query.ilike("TicketId", `%${ticketId}%`);
 
-  const { data, count, error } = await query;
+  const { data, count, error } = await query
+    .order(orderColumn, { ascending: sortAscending })
+    .order("request_date", { ascending: false })
+    .order("TicketId", { ascending: false })
+    .range(offset, offset + pageSize - 1);
   if (error) {
     console.error("Failed to load public tickets.", error);
     return jsonResponse(500, { error: "Tickets could not be loaded." });
   }
 
-  let allTickets: TicketRow[] = data ?? [];
-  if (sortBy === "next_fix_date") {
-    try {
-      allTickets = await Promise.all(
-        allTickets.map(async (ticket) => ({
-          ...ticket,
-          next_fix_date: await ticketNextFixDate(supabase, ticket.TicketId),
-        })),
-      );
-    } catch (error) {
-      console.error("Failed to load ticket schedules for sorting.", error);
-      return jsonResponse(500, {
-        error: "Ticket schedules could not be loaded.",
-      });
-    }
-  }
-  const pageTickets = sortTickets(allTickets, sortBy, sortAscending).slice(
-    offset,
-    offset + pageSize,
-  );
-  const tickets = await Promise.all(
-    pageTickets.map(async (ticket) => {
-      return {
-        ...ticket,
-        next_fix_date: sortBy === "next_fix_date"
-          ? ticket.next_fix_date ?? null
-          : await ticketNextFixDate(supabase, ticket.TicketId),
-      };
-    }),
-  ).catch((error: unknown) => {
-    console.error("Failed to load ticket schedules.", error);
-    return null;
-  });
-
-  if (tickets === null) {
-    return jsonResponse(500, { error: "Ticket schedules could not be loaded." });
-  }
-
-  return jsonResponse(200, { tickets, total: count ?? 0 });
+  return jsonResponse(200, { tickets: data ?? [], total: count ?? 0 });
 });

@@ -7,12 +7,15 @@ import '../auth/function_error_message.dart';
 import '../auth/google_auth.dart';
 import '../auth/temporary_account_session.dart';
 import '../database/connect.dart';
+import '../database/realtime_invalidation.dart';
+import 'activity_log_page.dart';
 import 'fixRequest.dart';
 import 'personal_info_page.dart';
 import 'superAccept.dart';
 import 'technicianManager.dart';
 import 'ticketMonitor.dart';
 import 'userManager.dart';
+import 'workList.dart';
 
 class Layout extends StatefulWidget {
   const Layout({super.key, this.roleOverride});
@@ -23,7 +26,7 @@ class Layout extends StatefulWidget {
   State<Layout> createState() => _LayoutState();
 }
 
-class _LayoutState extends State<Layout> {
+class _LayoutState extends State<Layout> with WidgetsBindingObserver {
   final _scaffoldKey = GlobalKey<ScaffoldState>();
   String? _selectedPage;
   int _profileImageRevision = 0;
@@ -32,7 +35,40 @@ class _LayoutState extends State<Layout> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    unawaited(_startRealtime());
     if (widget.roleOverride == null) _restoreGoogleSession();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      RealtimeInvalidationService.instance.onAppResumed();
+    }
+  }
+
+  Future<void> _startRealtime() async {
+    if (!SupabaseConnection.isInitialized) return;
+    try {
+      await RealtimeInvalidationService.instance.start();
+    } on Exception catch (error) {
+      debugPrint('Failed to start Supabase Realtime: $error');
+    }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    unawaited(_stopRealtime());
+    super.dispose();
+  }
+
+  Future<void> _stopRealtime() async {
+    try {
+      await RealtimeInvalidationService.instance.stop();
+    } on Exception catch (error) {
+      debugPrint('Failed to stop Supabase Realtime: $error');
+    }
   }
 
   @override
@@ -69,6 +105,7 @@ class _LayoutState extends State<Layout> {
           style: TextStyle(fontWeight: FontWeight.bold),
         ),
         actions: [
+          const _RealtimeConnectionIndicator(),
           if (temporaryAccount == null)
             IconButton(
               tooltip: 'เข้าสู่ระบบ',
@@ -203,19 +240,27 @@ class _LayoutState extends State<Layout> {
         children: [
           for (final page in pages)
             if (page.id == 'ticket_monitor' ||
-                ((role == 'User' || role == 'Admin' || role == 'SuperAdmin') &&
-                    page.id == 'dashboard'))
-              TicketMonitor(adminMode: role == 'Admin' || role == 'SuperAdmin')
+                ((role == 'User' || role == 'Admin') && page.id == 'dashboard'))
+              TicketMonitor(adminMode: role == 'Admin')
+            else if (role == 'SuperAdmin' &&
+                (page.id == 'requests' || page.id == 'dashboard'))
+              const TicketMonitor(adminMode: false)
             else if (page.id == 'my_requests')
               const TicketMonitor(myRequests: true)
             else if (page.id == 'new_request')
               const FixRequestPage()
             else if (page.id == 'technician_manager')
               const TechnicianManagerPage()
+            else if (page.id == 'assigned')
+              const WorkList()
             else if (page.id == 'users')
               const UserManagerPage()
             else if (page.id == 'action_confirmation')
               const SuperAcceptPage()
+            else if (page.id == 'activity_log')
+              const ActivityLogPage()
+            else if (page.id == 'reports')
+              const TechnicianWorkReviewPage()
             else
               _PageContent(page: page, role: role),
         ],
@@ -363,10 +408,20 @@ class _ProfileAvatar extends StatefulWidget {
 class _ProfileAvatarState extends State<_ProfileAvatar> {
   String? _avatarUrl;
   bool _isLoading = true;
+  int _avatarLoadVersion = 0;
+  late final RealtimeRefreshBinding _realtimeRefresh;
 
   @override
   void initState() {
     super.initState();
+    _realtimeRefresh = RealtimeRefreshBinding(
+      domains: const {
+        RealtimeInvalidationDomain.accounts,
+        RealtimeInvalidationDomain.storage,
+      },
+      onRefresh: _loadAvatar,
+      isMounted: () => mounted,
+    );
     _loadAvatar();
   }
 
@@ -376,7 +431,14 @@ class _ProfileAvatarState extends State<_ProfileAvatar> {
     if (oldWidget.accessToken != widget.accessToken) _loadAvatar();
   }
 
+  @override
+  void dispose() {
+    _realtimeRefresh.dispose();
+    super.dispose();
+  }
+
   Future<void> _loadAvatar() async {
+    final loadVersion = ++_avatarLoadVersion;
     final accessToken = widget.accessToken;
     if (accessToken == null || !SupabaseConnection.isInitialized) {
       setState(() {
@@ -401,7 +463,7 @@ class _ProfileAvatarState extends State<_ProfileAvatar> {
       if (url != null && url is! String) {
         throw const FormatException('Invalid profile image response.');
       }
-      if (mounted) {
+      if (mounted && loadVersion == _avatarLoadVersion) {
         setState(() {
           _avatarUrl = url as String?;
           _isLoading = false;
@@ -409,7 +471,7 @@ class _ProfileAvatarState extends State<_ProfileAvatar> {
       }
     } on Exception catch (error) {
       debugPrint('Failed to load profile image for app bar: $error');
-      if (mounted) {
+      if (mounted && loadVersion == _avatarLoadVersion) {
         setState(() {
           _avatarUrl = null;
           _isLoading = false;
@@ -427,6 +489,46 @@ class _ProfileAvatarState extends State<_ProfileAvatar> {
       child: imageUrl == null || _isLoading
           ? const Icon(Icons.person_outline, size: 21)
           : null,
+    );
+  }
+}
+
+class _RealtimeConnectionIndicator extends StatelessWidget {
+  const _RealtimeConnectionIndicator();
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<RealtimeConnectionState>(
+      valueListenable: RealtimeInvalidationService.instance.connectionState,
+      builder: (context, state, _) {
+        final colorScheme = Theme.of(context).colorScheme;
+        final message = switch (state) {
+          RealtimeConnectionState.connected => 'เชื่อมต่อข้อมูลสดแล้ว',
+          RealtimeConnectionState.connecting => 'กำลังเชื่อมต่อข้อมูลสด',
+          RealtimeConnectionState.disconnected =>
+            'ขาดการเชื่อมต่อข้อมูลสด กำลังลองเชื่อมต่อใหม่',
+        };
+        final icon = switch (state) {
+          RealtimeConnectionState.connected => Icons.cloud_done_outlined,
+          RealtimeConnectionState.connecting => Icons.cloud_sync_outlined,
+          RealtimeConnectionState.disconnected => Icons.cloud_off_outlined,
+        };
+        final iconColor = switch (state) {
+          RealtimeConnectionState.connected => colorScheme.primary,
+          RealtimeConnectionState.connecting => colorScheme.tertiary,
+          RealtimeConnectionState.disconnected => colorScheme.error,
+        };
+        return Tooltip(
+          message: message,
+          child: Semantics(
+            label: message,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: Icon(icon, color: iconColor),
+            ),
+          ),
+        );
+      },
     );
   }
 }
@@ -514,12 +616,6 @@ List<_PageInfo> _pagesFor(String role) {
         Icons.assignment_outlined,
         'รายการงานซ่อมที่ได้รับมอบหมาย',
       ),
-      const _PageInfo(
-        'history',
-        'ประวัติการซ่อม',
-        Icons.history,
-        'ประวัติการดำเนินงานซ่อม',
-      ),
     ],
     'Admin' => [
       adminRequests,
@@ -537,9 +633,9 @@ List<_PageInfo> _pagesFor(String role) {
       ),
       const _PageInfo(
         'reports',
-        'รายงาน',
-        Icons.assessment_outlined,
-        'รายงานภาพรวมการแจ้งซ่อม',
+        'ตรวจงานช่าง',
+        Icons.fact_check_outlined,
+        'ตรวจสอบรายงานงานซ่อมจากช่าง',
       ),
     ],
     'SuperAdmin' => [
@@ -562,10 +658,10 @@ List<_PageInfo> _pagesFor(String role) {
         'ตรวจสอบและยืนยันการกระทำ',
       ),
       const _PageInfo(
-        'reports',
-        'รายงาน',
-        Icons.assessment_outlined,
-        'รายงานภาพรวมการแจ้งซ่อม',
+        'activity_log',
+        'ประวัติ (Log)',
+        Icons.receipt_long_outlined,
+        'ประวัติการกระทำทั้งหมดในระบบ',
       ),
     ],
     'Unsign' => [

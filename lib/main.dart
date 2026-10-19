@@ -36,6 +36,7 @@ class _ConnectionGate extends StatefulWidget {
 class _ConnectionGateState extends State<_ConnectionGate> {
   bool _isChecking = true;
   String? _errorMessage;
+  int _retryAttempt = 0;
 
   @override
   void initState() {
@@ -57,7 +58,18 @@ class _ConnectionGateState extends State<_ConnectionGate> {
       if (!mounted) return;
       setState(() => _errorMessage = error.toString());
     } finally {
-      if (mounted) setState(() => _isChecking = false);
+      if (mounted) {
+        setState(() => _isChecking = false);
+        if (_errorMessage != null) {
+          final delay = Duration(seconds: 1 << _retryAttempt.clamp(0, 5));
+          _retryAttempt = (_retryAttempt + 1).clamp(0, 5);
+          Future<void>.delayed(delay, () {
+            if (mounted && _errorMessage != null) _checkConnection();
+          });
+        } else {
+          _retryAttempt = 0;
+        }
+      }
     }
   }
 
@@ -79,11 +91,7 @@ class _ConnectionGateState extends State<_ConnectionGate> {
     }
 
     if (_errorMessage case final error?) {
-      return DatabaseConnectionErrorPage(
-        errorMessage: error,
-        onRetry: _checkConnection,
-        isRetrying: _isChecking,
-      );
+      return DatabaseConnectionErrorPage(errorMessage: error);
     }
 
     return const Layout();

@@ -22,6 +22,9 @@ verify_jwt = false
 [functions.maintenance-teams]
 verify_jwt = false
 
+[functions.technician-work]
+verify_jwt = false
+
 [functions.superadmin-users]
 verify_jwt = false
 
