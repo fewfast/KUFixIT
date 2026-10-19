@@ -257,3 +257,39 @@
   - **Scratch & Emulator dumps**: ignored `bugreport-*.zip`, `*.tmp`, `*.bak`, `*.orig`.
 - Verified with `git status`: Untracked junk files (`bugreport-*.zip`, `supabase/.temp/`) are now properly ignored.
 - Ran `flutter test`: all 65 tests passed.
+
+
+## Mobile Crash on Google Login & Google Maps Fix (2026-10-20)
+- **Problem 1 (Android App Crash / Disconnect after Google Login)**:
+  - On real devices (Pixel 9 / Android 14+), returning from Chrome Custom Tabs (`io.supabase.flutter://login-callback`) triggered activity destruction and lost debugger connection (`Lost connection to device`) due to `android:launchMode="singleTop"` and `android:taskAffinity=""`.
+  - **Resolution (`android/app/src/main/AndroidManifest.xml`)**:
+    - Changed `launchMode` from `singleTop` to `singleTask` on `.MainActivity` so that deep link intent callback is received on the existing instance via `onNewIntent` without destroying the activity.
+    - Removed `android:taskAffinity=""` so the activity stays in the application's root task.
+    - Added `android:enableOnBackInvokedCallback="true"` to `<application>` to support Android 13/14+ predictive back gestures cleanly.
+- **Problem 2 (Google Maps Blank / Gray Screen & Map Complexity)**:
+  - On mobile devices without `MAPS_API_KEY` configured in `android/local.properties`, Google Maps showed blank/gray tiles and required external API credentials.
+  - **Resolution (`lib/gui/fixRequest.dart`)**:
+    - Completely removed `google_maps_flutter` dependency and usage from the app codebase.
+    - Standardized on OpenStreetMap (`flutter_map`) across all platforms (Android, iOS, Web, Windows, Desktop).
+    - Removed the map toggle button from `_LocationPickerDialog`'s title to keep the dialog simple and clean (`title: const Text('เลือกตำแหน่ง')`).
+    - Handled marker placement, dragging, and coordinate confirmation directly using `latlong2.LatLng` and `FlutterMap`.
+- **Verification**:
+  - `flutter test`: all 66 unit and widget tests passed (including dedicated Android and Windows OpenStreetMap tests).
+  - `flutter analyze`: 0 errors, 0 warnings.
+
+
+## TicketMonitor Status Cell UI Overflow Fix (2026-10-20)
+- **Problem**: In the "รายการแจ้งซ่อมของฉัน" (My Requests) page for tickets with `validating` status, the status column cell contains a status badge, cancel request button (`IconButton`), and expand/collapse arrow icon, which caused a RenderFlex overflow (`right overflowed by 17 pixels`) on compact screens.
+- **Resolution (`lib/gui/ticketMonitor.dart`)**:
+  - **Table Proportions**:
+    - In `LayoutBuilder`, increased minimum `tableWidth` threshold from 900 to 940 px.
+    - Updated column distribution formula (`columnWidth = tableWidth / 9.0; statusColumnWidth = columnWidth * 1.8;`), increasing status column width from ~155px to ~188px.
+  - **FittedBox Fail-safe**:
+    - In `_ExpandableTicketRowState`, wrapped the status cell `Row` with `FittedBox(fit: BoxFit.scaleDown, alignment: Alignment.center)`.
+    - Guarantees that even with large accessibility font sizes or narrow dimensions, the status badge and action icons scale down gracefully without triggering any yellow-black stripe RenderFlex overflow.
+- **Verification**:
+  - `flutter analyze lib/gui/ticketMonitor.dart test/`: passed (0 issues).
+  - `flutter test`: all 66 tests passed.
+
+
+

@@ -60,4 +60,34 @@ void main() {
       debugDefaultTargetPlatformOverride = previousPlatform;
     }
   });
+
+  testWidgets(
+    'Android location picker uses OpenStreetMap with clean title and no toggle button',
+    (tester) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+
+      try {
+        await tester.pumpWidget(
+          const MaterialApp(home: Scaffold(body: FixRequestPage())),
+        );
+
+        await tester.tap(find.byType(TextFormField).first);
+        await tester.enterText(find.byType(TextFormField).first, 'อื่น');
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('อื่นๆ').last);
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('เลือกตำแหน่งบนแผนที่'));
+        await tester.pumpAndSettle();
+
+        expect(find.byType(FlutterMap), findsOneWidget);
+        expect(find.text('เลือกตำแหน่ง'), findsOneWidget);
+        expect(find.text('Google Maps'), findsNothing);
+        expect(find.text('OpenStreetMap'), findsNothing);
+        expect(find.text('แตะบนแผนที่เพื่อเลือกตำแหน่ง'), findsOneWidget);
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    },
+  );
 }

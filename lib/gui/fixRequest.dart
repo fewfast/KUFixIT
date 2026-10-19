@@ -1,12 +1,10 @@
 import 'dart:convert';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_map/flutter_map.dart' as flutter_map;
-import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:latlong2/latlong.dart' as latlong;
+import 'package:latlong2/latlong.dart';
 
 import '../auth/temporary_account_session.dart';
 import '../database/connect.dart';
@@ -637,7 +635,9 @@ class _FixRequestPageState extends State<FixRequestPage> {
 }
 
 class _LocationPickerDialog extends StatefulWidget {
-  const _LocationPickerDialog({this.initialPosition});
+  const _LocationPickerDialog({
+    this.initialPosition,
+  });
 
   final LatLng? initialPosition;
 
@@ -657,10 +657,6 @@ class _LocationPickerDialogState extends State<_LocationPickerDialog> {
   @override
   Widget build(BuildContext context) {
     final position = _selectedPosition;
-    final isGoogleMapsSupported =
-        !kIsWeb &&
-        (defaultTargetPlatform == TargetPlatform.android ||
-            defaultTargetPlatform == TargetPlatform.iOS);
     return AlertDialog(
       title: const Text('เลือกตำแหน่ง'),
       content: SizedBox(
@@ -669,76 +665,43 @@ class _LocationPickerDialogState extends State<_LocationPickerDialog> {
         child: Column(
           children: [
             Expanded(
-              child: isGoogleMapsSupported
-                  ? GoogleMap(
-                      initialCameraPosition: CameraPosition(
-                        target: position ?? _campusCenter,
-                        zoom: 16,
-                      ),
-                      markers: {
-                        if (position case final selected?)
-                          Marker(
-                            markerId: const MarkerId('selected-location'),
-                            position: selected,
-                            draggable: true,
-                            onDragEnd: (value) =>
-                                setState(() => _selectedPosition = value),
+              child: flutter_map.FlutterMap(
+                options: flutter_map.MapOptions(
+                  initialCenter: position ?? _campusCenter,
+                  initialZoom: 16,
+                  onTap: (_, value) => setState(
+                    () => _selectedPosition = value,
+                  ),
+                ),
+                children: [
+                  flutter_map.TileLayer(
+                    urlTemplate:
+                        'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                    userAgentPackageName: 'com.example.mobileproject',
+                  ),
+                  if (position case final selected?)
+                    flutter_map.MarkerLayer(
+                      markers: [
+                        flutter_map.Marker(
+                          point: selected,
+                          child: Icon(
+                            Icons.location_pin,
+                            color: Theme.of(context).colorScheme.error,
+                            size: 40,
                           ),
-                      },
-                      onTap: (value) =>
-                          setState(() => _selectedPosition = value),
-                    )
-                  : flutter_map.FlutterMap(
-                      options: flutter_map.MapOptions(
-                        initialCenter: position == null
-                            ? latlong.LatLng(
-                                _campusCenter.latitude,
-                                _campusCenter.longitude,
-                              )
-                            : latlong.LatLng(
-                                position.latitude,
-                                position.longitude,
-                              ),
-                        initialZoom: 16,
-                        onTap: (_, value) => setState(
-                          () => _selectedPosition = LatLng(
-                            value.latitude,
-                            value.longitude,
-                          ),
-                        ),
-                      ),
-                      children: [
-                        flutter_map.TileLayer(
-                          urlTemplate:
-                              'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                          userAgentPackageName: 'com.example.mobileproject',
-                        ),
-                        if (position case final selected?)
-                          flutter_map.MarkerLayer(
-                            markers: [
-                              flutter_map.Marker(
-                                point: latlong.LatLng(
-                                  selected.latitude,
-                                  selected.longitude,
-                                ),
-                                child: Icon(
-                                  Icons.location_pin,
-                                  color: Theme.of(context).colorScheme.error,
-                                  size: 40,
-                                ),
-                              ),
-                            ],
-                          ),
-                        const flutter_map.RichAttributionWidget(
-                          showFlutterMapAttribution: false,
-                          attributions: [
-                            flutter_map.TextSourceAttribution(
-                              '© OpenStreetMap contributors',
-                            ),
-                          ],
                         ),
                       ],
                     ),
+                  const flutter_map.RichAttributionWidget(
+                    showFlutterMapAttribution: false,
+                    attributions: [
+                      flutter_map.TextSourceAttribution(
+                        '© OpenStreetMap contributors',
+                      ),
+                    ],
+                  ),
+                ],
+              ),
             ),
             const SizedBox(height: 8),
             Text(

@@ -358,14 +358,14 @@ class _TicketMonitorState extends State<TicketMonitor> {
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        final tableWidth = constraints.maxWidth < 900
-            ? 900.0
+        final tableWidth = constraints.maxWidth < 940
+            ? 940.0
             : constraints.maxWidth;
         final colors = Theme.of(context).colorScheme;
         final borderColor = colors.outlineVariant.withValues(alpha: 0.55);
-        final columnWidth = tableWidth / 8.7;
+        final columnWidth = tableWidth / 9.0;
         final scheduleColumnWidth = columnWidth * 1.2;
-        final statusColumnWidth = columnWidth * 1.5;
+        final statusColumnWidth = columnWidth * 1.8;
         final headingStyle = Theme.of(context).textTheme.labelLarge?.copyWith(
           color: colors.onPrimaryContainer,
           fontWeight: FontWeight.w700,
@@ -960,52 +960,56 @@ class _ExpandableTicketRowState extends State<_ExpandableTicketRow> {
                     widget.tableCell(
                       '',
                       backgroundColor: Colors.transparent,
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 8,
-                              vertical: 6,
-                            ),
-                            decoration: BoxDecoration(
-                              color: _ticketStatusColor(
-                                widget.ticket.status,
-                              ).withValues(alpha: 0.14),
-                              borderRadius: BorderRadius.circular(20),
-                            ),
-                            child: Text(
-                              _ticketStatusLabel(widget.ticket.status),
-                              style: TextStyle(
-                                color: _ticketStatusColor(widget.ticket.status),
-                                fontSize: 12,
-                                fontWeight: FontWeight.w600,
+                      child: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        alignment: Alignment.center,
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 8,
+                                vertical: 6,
+                              ),
+                              decoration: BoxDecoration(
+                                color: _ticketStatusColor(
+                                  widget.ticket.status,
+                                ).withValues(alpha: 0.14),
+                                borderRadius: BorderRadius.circular(20),
+                              ),
+                              child: Text(
+                                _ticketStatusLabel(widget.ticket.status),
+                                style: TextStyle(
+                                  color: _ticketStatusColor(widget.ticket.status),
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                ),
                               ),
                             ),
-                          ),
-                          const SizedBox(width: 4),
-                          if (widget.myRequests &&
-                              widget.ticket.status == 'validating')
-                            IconButton(
-                              tooltip: 'ยกเลิกคำร้อง',
-                              onPressed: _cancelRequest,
-                              icon: const Icon(Icons.close),
-                              iconSize: 18,
-                              padding: EdgeInsets.zero,
-                              constraints: const BoxConstraints.tightFor(
-                                width: 30,
-                                height: 30,
+                            const SizedBox(width: 4),
+                            if (widget.myRequests &&
+                                widget.ticket.status == 'validating')
+                              IconButton(
+                                tooltip: 'ยกเลิกคำร้อง',
+                                onPressed: _cancelRequest,
+                                icon: const Icon(Icons.close),
+                                iconSize: 18,
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints.tightFor(
+                                  width: 30,
+                                  height: 30,
+                                ),
+                                color: colors.error,
                               ),
-                              color: colors.error,
+                            Icon(
+                              _isExpanded
+                                  ? Icons.keyboard_arrow_up
+                                  : Icons.keyboard_arrow_down,
+                              size: 20,
+                              color: colors.onSurfaceVariant,
                             ),
-                          Icon(
-                            _isExpanded
-                                ? Icons.keyboard_arrow_up
-                                : Icons.keyboard_arrow_down,
-                            size: 20,
-                            color: colors.onSurfaceVariant,
-                          ),
-                        ],
+                          ],
+                        ),
                       ),
                     ),
                   ],
