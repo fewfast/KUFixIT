@@ -328,9 +328,10 @@ Deno.serve(async (request) => {
           (typeof area === "string" && area.trim() !== "")) &&
         (building === "other" || area == null || area === building) &&
         (floor == null ||
+          floor === "" ||
           (typeof floor === "string" &&
-            /^\d+$/.test(floor) &&
-            floor.replace(/^0+/, "").length <= 2 &&
+            /^\d+$/.test(floor.trim()) &&
+            Number(floor) >= 1 &&
             Number(floor) <= 50)) &&
         (building === "other" ||
           (typeof floor === "string" && floor.trim() !== "")) &&
@@ -534,8 +535,14 @@ Deno.serve(async (request) => {
           p_latitude: latitude,
           p_longtitude: longtitude,
           p_area: area == null ? null : String(area).trim(),
-          p_floor: floor == null ? null : String(floor).trim(),
-          p_room: room == null ? null : String(room).trim(),
+          p_floor:
+            floor == null || String(floor).trim() === ""
+              ? null
+              : String(floor).trim(),
+          p_room:
+            room == null || String(room).trim() === ""
+              ? null
+              : String(room).trim(),
           p_status: status,
           p_technician_team:
             technicianTeam == null ? null : String(technicianTeam).trim(),

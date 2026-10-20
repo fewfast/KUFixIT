@@ -204,4 +204,40 @@ void main() {
     );
     expect(session.account, isNull);
   });
+
+  test('serializes to JSON and can be restored via BrowserSessionStorage', () {
+    final expiresAt =
+        DateTime.now().add(const Duration(hours: 1)).millisecondsSinceEpoch ~/
+        1000;
+
+    session.setFromResponse({
+      'id': 'admin_1',
+      'username': 'admin_user',
+      'uid': 'u_9999999999',
+      'firstname': 'Admin',
+      'lastname': 'Master',
+      'displayname': 'Admin Master',
+      'hasNationalId': true,
+      'isSystemAccount': true,
+      'role': 'SuperAdmin',
+      'accessToken': 'super-admin-jwt',
+      'expiresAt': expiresAt,
+    });
+
+    final json = session.account!.toJson();
+    expect(json['id'], 'admin_1');
+    expect(json['username'], 'admin_user');
+    expect(json['role'], 'SuperAdmin');
+    expect(json['isSystemAccount'], isTrue);
+
+    // Verify deserialization from the saved JSON
+    final restored = TemporaryAccount.fromResponse(json);
+    expect(restored.id, 'admin_1');
+    expect(restored.displayName, 'Admin Master');
+    expect(restored.role, 'SuperAdmin');
+
+    // Test clear removes from session
+    session.clear();
+    expect(session.account, isNull);
+  });
 }

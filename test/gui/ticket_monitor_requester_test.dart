@@ -67,6 +67,16 @@ void main() {
 
     // Verify requester info is displayed beside sub-devices header
     expect(find.text('ผู้ส่งคำร้อง สมชาย ใจดี(1020304050)'), findsOneWidget);
+
+    // Verify edit button and repair history button are positioned on the right
+    final editButtonPos = tester.getTopLeft(find.byTooltip('แก้ไขข้อมูลคำร้อง'));
+    final historyButtonPos = tester.getTopLeft(find.text('ประวัติการซ่อม'));
+    final requesterTextPos = tester.getTopLeft(
+      find.text('ผู้ส่งคำร้อง สมชาย ใจดี(1020304050)'),
+    );
+
+    expect(editButtonPos.dx, greaterThan(requesterTextPos.dx));
+    expect(historyButtonPos.dx, greaterThan(editButtonPos.dx));
   });
 
   testWidgets(

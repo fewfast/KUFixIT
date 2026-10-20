@@ -11,10 +11,15 @@ enum RealtimeInvalidationDomain {
   technicians,
   reports,
   storage,
+  activityLogs,
 }
 
 extension on RealtimeInvalidationDomain {
-  String get topic => 'kufixit:invalidate:$name';
+  String get topic => switch (this) {
+        RealtimeInvalidationDomain.activityLogs =>
+          'kufixit:invalidate:activity_logs',
+        _ => 'kufixit:invalidate:$name',
+      };
 }
 
 enum RealtimeConnectionState { connecting, connected, disconnected }

@@ -412,3 +412,22 @@
   - Updated `test/widget_test.dart` search expectation for Admin role.
   - `flutter analyze`: 0 errors.
   - `flutter test --no-pub`: all 76 tests passed.
+
+
+## Admin Change Other User Display Name Logging (2026-10-20)
+- **Objective:** Record activity log in `public.activity_logs` when Admin updates another user's Display Name (`action === "submit-change"` in `superadmin-users`).
+- **Backend (`supabase/functions/superadmin-users/index.ts`):**
+  - In `action === "submit-change"`:
+    - Extracted Admin's UID (`requesterUid`).
+    - When `claims.role === "Admin"` successfully updates user's display name:
+      - Inserts log with `action_type: 'CHANGE_USER_DISPLAY_NAME'`, `action_title: 'แอดมินเปลี่ยนชื่อที่แสดงของผู้ใช้อื่น'`, `target_id: target.uid`, `description: แอดมินเปลี่ยนชื่อที่แสดงของ ${target.uid} จาก "${target["Display Name"]}" เป็น "${requestedDisplayName}"`, and metadata `{ target_uid, old_display_name, new_display_name }`.
+  - Deployed `superadmin-users` function to Supabase.
+- **Frontend (`lib/gui/activity_log_page.dart`):**
+  - Updated Action Type dropdown filter item:
+    `DropdownMenuItem(value: 'CHANGE_DISPLAY_NAME,CHANGE_USER_DISPLAY_NAME', child: Text('เปลี่ยนชื่อที่แสดง (ตนเอง/ผู้อื่น)'))`
+  - Added action icon mapping `_getActionIcon(log.actionType)` displaying `Icons.badge_outlined` for `CHANGE_USER_DISPLAY_NAME` and `Icons.drive_file_rename_outline` for `CHANGE_DISPLAY_NAME`.
+  - Log card displays action icon, action title, description, and target ID Chip (`#${log.targetId}`).
+- **Testing & Verification:**
+  - Updated `test/gui/activity_log_page_test.dart` to cover `CHANGE_USER_DISPLAY_NAME` rendering.
+  - `flutter analyze`: 0 errors.
+  - `flutter test --no-pub`: all 76 tests passed.

@@ -55,6 +55,7 @@ Deno.serve(async (request) => {
   });
   const isSystemAccount = claims.username === claims.sub;
   let requesterDisplayName: string;
+  let requesterUid: string = claims.sub;
   try {
     if (isSystemAccount) {
       const { data, error } = await supabase
@@ -74,10 +75,11 @@ Deno.serve(async (request) => {
         return jsonResponse(403, { error: "ต้องใช้บัญชีผู้ดูแลระบบที่ยังใช้งานได้" });
       }
       requesterDisplayName = data.Username;
+      requesterUid = data.Username;
     } else {
       const { data, error } = await supabase
         .from("Users")
-        .select('role, status, "Display Name"')
+        .select('uid, role, status, "Display Name"')
         .eq("google_auth_user_id", claims.sub)
         .maybeSingle();
       if (error) throw error;
@@ -85,6 +87,9 @@ Deno.serve(async (request) => {
         return jsonResponse(403, { error: "ต้องใช้บัญชีผู้ดูแลระบบที่ยังใช้งานได้" });
       }
       requesterDisplayName = data["Display Name"];
+      if (typeof data.uid === "string" && data.uid) {
+        requesterUid = data.uid;
+      }
     }
   } catch (error) {
     console.error("Failed to verify the SuperAdmin account.", error);
@@ -198,6 +203,27 @@ Deno.serve(async (request) => {
         console.error("Admin failed to update a user display name.", updateError);
         return jsonResponse(500, { error: "ไม่สามารถบันทึกชื่อที่แสดงได้" });
       }
+
+      const { error: logError } = await supabase.from("activity_logs").insert({
+        actor_username: requesterUid,
+        actor_role: "Admin",
+        actor_display_name: requesterDisplayName,
+        action_type: "CHANGE_USER_DISPLAY_NAME",
+        action_title: "แอดมินเปลี่ยนชื่อที่แสดงของผู้ใช้อื่น",
+        target_id: target.uid,
+        description: `แอดมินเปลี่ยนชื่อที่แสดงของ ${target.uid} จาก "${target["Display Name"] ?? ""}" เป็น "${requestedDisplayName}"`,
+        metadata: {
+          uid: requesterUid,
+          target_uid: target.uid,
+          old_display_name: target["Display Name"],
+          new_display_name: requestedDisplayName,
+        },
+        created_at: new Date().toISOString(),
+      });
+      if (logError) {
+        console.error("Failed to record activity log for admin user display name change:", logError);
+      }
+
       return jsonResponse(200, {
         result: { status: "updated", displayNameUpdated: true },
       });
@@ -218,6 +244,38 @@ Deno.serve(async (request) => {
       console.error("Failed to submit SuperAdmin user change.", error);
       return jsonResponse(409, { error: error.message });
     }
+
+    const displayNameUpdated =
+      (isRecord(data) && data.displayNameUpdated === true) ||
+      (requestedDisplayName !== undefined &&
+        requestedDisplayName !== null &&
+        requestedDisplayName !== target["Display Name"]);
+
+    if (displayNameUpdated) {
+      const { error: logError } = await supabase.from("activity_logs").insert({
+        actor_username: requesterUid,
+        actor_role: "SuperAdmin",
+        actor_display_name: requesterDisplayName,
+        action_type: "CHANGE_USER_DISPLAY_NAME",
+        action_title: "SuperAdmin เปลี่ยนชื่อที่แสดงของผู้ใช้อื่น",
+        target_id: target.uid,
+        description: `SuperAdmin เปลี่ยนชื่อที่แสดงของ ${target.uid} จาก "${target["Display Name"] ?? ""}" เป็น "${requestedDisplayName}"`,
+        metadata: {
+          uid: requesterUid,
+          target_uid: target.uid,
+          old_display_name: target["Display Name"],
+          new_display_name: requestedDisplayName,
+        },
+        created_at: new Date().toISOString(),
+      });
+      if (logError) {
+        console.error(
+          "Failed to record activity log for superadmin user display name change:",
+          logError,
+        );
+      }
+    }
+
     return jsonResponse(200, { result: data });
   }
 

@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import 'package:flutter_map/flutter_map.dart' as flutter_map;
 import 'package:latlong2/latlong.dart' as latlong;
@@ -24,17 +25,23 @@ typedef FetchTicketsFn = Future<Map<String, dynamic>> Function({
   required bool sortAscending,
 });
 
+typedef FetchTicketDevicesFn = Future<Map<String, dynamic>> Function(
+  String ticketId,
+);
+
 class TicketMonitor extends StatefulWidget {
   const TicketMonitor({
     super.key,
     this.myRequests = false,
     this.adminMode = false,
     this.fetchTickets,
+    this.fetchDevices,
   });
 
   final bool myRequests;
   final bool adminMode;
   final FetchTicketsFn? fetchTickets;
+  final FetchTicketDevicesFn? fetchDevices;
 
   @override
   State<TicketMonitor> createState() => _TicketMonitorState();
@@ -641,6 +648,7 @@ class _TicketMonitorState extends State<TicketMonitor> {
                               ticket: _tickets[index],
                               myRequests: widget.myRequests,
                               adminMode: widget.adminMode,
+                              fetchDevices: widget.fetchDevices,
                               onTicketCancelled: _loadTickets,
                               index: index,
                               columnWidth: columnWidth,
@@ -730,6 +738,7 @@ class _ExpandableTicketRow extends StatefulWidget {
     required this.ticket,
     required this.myRequests,
     required this.adminMode,
+    this.fetchDevices,
     required this.onTicketCancelled,
     required this.index,
     required this.columnWidth,
@@ -743,6 +752,7 @@ class _ExpandableTicketRow extends StatefulWidget {
   final _Ticket ticket;
   final bool myRequests;
   final bool adminMode;
+  final FetchTicketDevicesFn? fetchDevices;
   final VoidCallback onTicketCancelled;
   final int index;
   final double columnWidth;
@@ -911,6 +921,34 @@ class _ExpandableTicketRowState extends State<_ExpandableTicketRow> {
 
   Future<void> _loadDevices() async {
     if (_isLoading) return;
+    if (widget.fetchDevices != null) {
+      setState(() {
+        _isLoading = true;
+        _errorMessage = null;
+      });
+      try {
+        final data = await widget.fetchDevices!(widget.ticket.ticketId);
+        final rawDevices = data['devices'] as List? ?? [];
+        final parsedDevices = rawDevices
+            .whereType<Map>()
+            .map((item) =>
+                _TicketDevice.fromJson(Map<String, dynamic>.from(item)))
+            .toList();
+        if (!mounted) return;
+        setState(() {
+          _devices = parsedDevices;
+          _hasLoaded = true;
+          _isLoading = false;
+        });
+      } catch (e) {
+        if (!mounted) return;
+        setState(() {
+          _errorMessage = e.toString();
+          _isLoading = false;
+        });
+      }
+      return;
+    }
     if (!SupabaseConnection.isInitialized) {
       setState(() => _errorMessage = 'ยังไม่ได้เชื่อมต่อ Supabase');
       return;
@@ -1296,8 +1334,12 @@ class _ExpandableTicketRowState extends State<_ExpandableTicketRow> {
 
   Widget _buildTicketDetailsHeading(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
+    final totalWidth = (widget.columnWidth * 6) +
+        widget.scheduleColumnWidth +
+        widget.statusColumnWidth;
+
     return Container(
-      width: double.infinity,
+      width: totalWidth,
       height: 42,
       padding: const EdgeInsets.symmetric(horizontal: 16),
       color: colors.surfaceContainerLow,
@@ -1325,7 +1367,7 @@ class _ExpandableTicketRowState extends State<_ExpandableTicketRow> {
             ),
           ],
           const Spacer(),
-          if (widget.adminMode)
+          if (widget.adminMode) ...[
             IconButton(
               tooltip: widget.ticket.status == 'cancel'
                   ? 'คำร้องที่ยกเลิกแล้วไม่สามารถแก้ไขได้'
@@ -1336,15 +1378,21 @@ class _ExpandableTicketRowState extends State<_ExpandableTicketRow> {
               icon: const Icon(Icons.edit_outlined),
               iconSize: 20,
               padding: EdgeInsets.zero,
-              constraints: const BoxConstraints.tightFor(width: 40, height: 40),
+              constraints:
+                  const BoxConstraints.tightFor(width: 40, height: 40),
             ),
+            const SizedBox(width: 4),
+          ],
           TextButton.icon(
             onPressed: () =>
                 setState(() => _showRepairHistory = !_showRepairHistory),
             icon: Icon(
-              _showRepairHistory ? Icons.devices_other_outlined : Icons.history,
+              _showRepairHistory
+                  ? Icons.devices_other_outlined
+                  : Icons.history,
             ),
-            label: Text(_showRepairHistory ? 'อุปกรณ์ย่อย' : 'ประวัติการซ่อม'),
+            label:
+                Text(_showRepairHistory ? 'อุปกรณ์ย่อย' : 'ประวัติการซ่อม'),
           ),
         ],
       ),
@@ -1357,6 +1405,7 @@ class _ExpandableTicketRowState extends State<_ExpandableTicketRow> {
   ) {
     return Column(
       mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         _buildTicketDetailsHeading(context),
         SizedBox(height: 44, child: tableHeader),
@@ -1365,8 +1414,11 @@ class _ExpandableTicketRowState extends State<_ExpandableTicketRow> {
   }
 
   Widget _buildDetailsMessage(Widget message, ColorScheme colors) {
+    final totalWidth = (widget.columnWidth * 6) +
+        widget.scheduleColumnWidth +
+        widget.statusColumnWidth;
     return Container(
-      width: double.infinity,
+      width: totalWidth,
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: colors.surfaceContainerLow,
@@ -1411,91 +1463,109 @@ class _ExpandableTicketRowState extends State<_ExpandableTicketRow> {
       color: colors.onSurfaceVariant,
       fontWeight: FontWeight.w700,
     );
+    final totalWidth = (widget.columnWidth * 6) +
+        widget.scheduleColumnWidth +
+        widget.statusColumnWidth;
     return LayoutBuilder(
-      builder: (context, constraints) => SizedBox(
-        width: constraints.maxWidth,
-        child: Container(
-          color: colors.surfaceContainerLow,
-          child: _detailsTable(
-            columnWidths: _historyColumnWidths(constraints.maxWidth),
-            columnBreakpoints: const [0.20, 0.37, 0.60, 0.85],
-            rows: [
-              TableRow(
-                children: [
-                  for (final label in const [
-                    'ช่วงเวลาที่ช่างทำงาน',
-                    'ชื่อทีมช่าง',
-                    'งานที่ซ่อมสำเร็จ',
-                    'Comment ช่าง',
-                    'รูปอุปกรณ์',
-                  ])
-                    _deviceCell(label, headings),
-                ],
-              ),
-            ],
+      builder: (context, constraints) {
+        final width = constraints.maxWidth.isFinite &&
+                constraints.maxWidth >= totalWidth
+            ? constraints.maxWidth
+            : totalWidth;
+        return SizedBox(
+          width: width,
+          child: Container(
+            color: colors.surfaceContainerLow,
+            child: _detailsTable(
+              columnWidths: _historyColumnWidths(width),
+              columnBreakpoints: const [0.20, 0.37, 0.60, 0.85],
+              rows: [
+                TableRow(
+                  children: [
+                    for (final label in const [
+                      'ช่วงเวลาที่ช่างทำงาน',
+                      'ชื่อทีมช่าง',
+                      'งานที่ซ่อมสำเร็จ',
+                      'Comment ช่าง',
+                      'รูปอุปกรณ์',
+                    ])
+                      _deviceCell(label, headings),
+                  ],
+                ),
+              ],
+            ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 
   Widget _buildRepairHistoryRow(BuildContext context, _RepairHistoryRow entry) {
     final values = Theme.of(context).textTheme.bodyMedium;
     final colors = Theme.of(context).colorScheme;
+    final totalWidth = (widget.columnWidth * 6) +
+        widget.scheduleColumnWidth +
+        widget.statusColumnWidth;
     return LayoutBuilder(
-      builder: (context, constraints) => SizedBox(
-        width: constraints.maxWidth,
-        child: Container(
-          color: colors.surfaceContainerLow,
-          child: _detailsTable(
-            columnWidths: _historyColumnWidths(constraints.maxWidth),
-            columnBreakpoints: const [0.20, 0.37, 0.60, 0.85],
-            rows: [
-              TableRow(
-                children: [
-                  _deviceCell(
-                    _formatRepairTimeRange(entry.startTime, entry.endTime),
-                    values,
-                  ),
-                  _deviceCell(entry.technician ?? '-', values),
-                  _deviceCell(
-                    entry.repairedDevices.isEmpty
-                        ? 'ไม่มีอุปกรณ์ที่ซ่อมสำเร็จ'
-                        : entry.repairedDevices,
-                    values,
-                  ),
-                  _deviceCell(
-                    entry.comment?.trim().isNotEmpty == true
-                        ? entry.comment!
-                        : '-',
-                    values,
-                  ),
-                  entry.photos.isNotEmpty
-                      ? Wrap(
-                          spacing: 4,
-                          children: [
-                            for (final photo in entry.photos)
-                              TextButton.icon(
-                                onPressed: () => _viewRepairHistoryPhoto(
-                                  context,
-                                  photo.photoUrl,
+      builder: (context, constraints) {
+        final width = constraints.maxWidth.isFinite &&
+                constraints.maxWidth >= totalWidth
+            ? constraints.maxWidth
+            : totalWidth;
+        return SizedBox(
+          width: width,
+          child: Container(
+            color: colors.surfaceContainerLow,
+            child: _detailsTable(
+              columnWidths: _historyColumnWidths(width),
+              columnBreakpoints: const [0.20, 0.37, 0.60, 0.85],
+              rows: [
+                TableRow(
+                  children: [
+                    _deviceCell(
+                      _formatRepairTimeRange(entry.startTime, entry.endTime),
+                      values,
+                    ),
+                    _deviceCell(entry.technician ?? '-', values),
+                    _deviceCell(
+                      entry.repairedDevices.isEmpty
+                          ? 'ไม่มีอุปกรณ์ที่ซ่อมสำเร็จ'
+                          : entry.repairedDevices,
+                      values,
+                    ),
+                    _deviceCell(
+                      entry.comment?.trim().isNotEmpty == true
+                          ? entry.comment!
+                          : '-',
+                      values,
+                    ),
+                    entry.photos.isNotEmpty
+                        ? Wrap(
+                            spacing: 4,
+                            children: [
+                              for (final photo in entry.photos)
+                                TextButton.icon(
+                                  onPressed: () => _viewRepairHistoryPhoto(
+                                    context,
+                                    photo.photoUrl,
+                                  ),
+                                  icon: const Icon(Icons.image_outlined),
+                                  label: Text(
+                                    photo.deviceId == null
+                                        ? 'ดูรูป'
+                                        : 'อุปกรณ์ ${photo.deviceId}',
+                                  ),
                                 ),
-                                icon: const Icon(Icons.image_outlined),
-                                label: Text(
-                                  photo.deviceId == null
-                                      ? 'ดูรูป'
-                                      : 'อุปกรณ์ ${photo.deviceId}',
-                                ),
-                              ),
-                          ],
-                        )
-                      : _deviceCell('-', values),
-                ],
-              ),
-            ],
+                            ],
+                          )
+                        : _deviceCell('-', values),
+                  ],
+                ),
+              ],
+            ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 
@@ -1514,63 +1584,81 @@ class _ExpandableTicketRowState extends State<_ExpandableTicketRow> {
       color: colors.onSurfaceVariant,
       fontWeight: FontWeight.w700,
     );
+    final totalWidth = (widget.columnWidth * 6) +
+        widget.scheduleColumnWidth +
+        widget.statusColumnWidth;
     return LayoutBuilder(
-      builder: (context, constraints) => SizedBox(
-        width: constraints.maxWidth,
-        child: Container(
-          color: colors.surfaceContainerLow,
-          child: _detailsTable(
-            columnWidths: _deviceColumnWidths(constraints.maxWidth),
-            columnBreakpoints: const [0.10, 0.30, 0.80],
-            rows: [
-              TableRow(
-                children: [
-                  for (final label in const [
-                    'ลำดับ',
-                    'อุปกรณ์',
-                    'รายละเอียด',
-                    'สถานะ',
-                  ])
-                    _deviceCell(label, headings),
-                ],
-              ),
-            ],
+      builder: (context, constraints) {
+        final width = constraints.maxWidth.isFinite &&
+                constraints.maxWidth >= totalWidth
+            ? constraints.maxWidth
+            : totalWidth;
+        return SizedBox(
+          width: width,
+          child: Container(
+            color: colors.surfaceContainerLow,
+            child: _detailsTable(
+              columnWidths: _deviceColumnWidths(width),
+              columnBreakpoints: const [0.10, 0.30, 0.80],
+              rows: [
+                TableRow(
+                  children: [
+                    for (final label in const [
+                      'ลำดับ',
+                      'อุปกรณ์',
+                      'รายละเอียด',
+                      'สถานะ',
+                    ])
+                      _deviceCell(label, headings),
+                  ],
+                ),
+              ],
+            ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 
   Widget _buildDeviceRow(BuildContext context, _TicketDevice device) {
     final values = Theme.of(context).textTheme.bodyMedium;
     final colors = Theme.of(context).colorScheme;
+    final totalWidth = (widget.columnWidth * 6) +
+        widget.scheduleColumnWidth +
+        widget.statusColumnWidth;
     return LayoutBuilder(
-      builder: (context, constraints) => SizedBox(
-        width: constraints.maxWidth,
-        child: Container(
-          color: colors.surfaceContainerLow,
-          child: _detailsTable(
-            columnWidths: _deviceColumnWidths(constraints.maxWidth),
-            columnBreakpoints: const [0.10, 0.30, 0.80],
-            rows: [
-              TableRow(
-                children: [
-                  _deviceCell(device.deviceId.toString(), values),
-                  _deviceCell(device.name, values),
-                  _deviceCell(device.description ?? '-', values),
-                  _deviceCell(
-                    _ticketStatusLabel(device.status),
-                    values?.copyWith(
-                      color: _ticketStatusColor(device.status),
-                      fontWeight: FontWeight.w600,
+      builder: (context, constraints) {
+        final width = constraints.maxWidth.isFinite &&
+                constraints.maxWidth >= totalWidth
+            ? constraints.maxWidth
+            : totalWidth;
+        return SizedBox(
+          width: width,
+          child: Container(
+            color: colors.surfaceContainerLow,
+            child: _detailsTable(
+              columnWidths: _deviceColumnWidths(width),
+              columnBreakpoints: const [0.10, 0.30, 0.80],
+              rows: [
+                TableRow(
+                  children: [
+                    _deviceCell(device.deviceId.toString(), values),
+                    _deviceCell(device.name, values),
+                    _deviceCell(device.description ?? '-', values),
+                    _deviceCell(
+                      _ticketStatusLabel(device.status),
+                      values?.copyWith(
+                        color: _ticketStatusColor(device.status),
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
-                  ),
-                ],
-              ),
-            ],
+                  ],
+                ),
+              ],
+            ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 
@@ -2086,6 +2174,18 @@ class _AdminTicketEditDialogState extends State<_AdminTicketEditDialog> {
                 ),
                 TextFormField(
                   controller: _floorController,
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [
+                    FilteringTextInputFormatter.digitsOnly,
+                    TextInputFormatter.withFunction((oldValue, newValue) {
+                      if (newValue.text.isEmpty) return newValue;
+                      final value = int.tryParse(newValue.text);
+                      if (value != null && value <= 50) {
+                        return newValue;
+                      }
+                      return oldValue;
+                    }),
+                  ],
                   decoration: InputDecoration(
                     labelText: _selectedBuilding == otherBuildingLabel
                         ? 'ชั้น'
@@ -2098,19 +2198,13 @@ class _AdminTicketEditDialogState extends State<_AdminTicketEditDialog> {
                         floor.isEmpty) {
                       return 'กรุณาระบุชั้น';
                     }
-                    final normalizedFloor = floor.replaceFirst(
-                      RegExp(r'^0+'),
-                      '',
-                    );
-                    final floorNumber = int.tryParse(
-                      normalizedFloor.isEmpty ? '0' : normalizedFloor,
-                    );
-                    if (floor.isNotEmpty &&
-                        (!RegExp(r'^\d+$').hasMatch(floor) ||
-                            normalizedFloor.length > 2 ||
-                            floorNumber == null ||
-                            floorNumber > 50)) {
-                      return 'ชั้นต้องเป็นตัวเลขระหว่าง 0-50';
+                    if (floor.isNotEmpty) {
+                      final floorNumber = int.tryParse(floor);
+                      if (floorNumber == null ||
+                          floorNumber < 1 ||
+                          floorNumber > 50) {
+                        return 'กรุณาระบุชั้นเป็นตัวเลขระหว่าง 1 ถึง 50';
+                      }
                     }
                     return null;
                   },

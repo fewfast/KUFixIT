@@ -1,6 +1,9 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
+
+import 'session_storage.dart';
 
 class TemporaryAccount {
   const TemporaryAccount({
@@ -39,6 +42,26 @@ class TemporaryAccount {
     final name = googleDisplayName?.trim();
     return name == null || name.isEmpty ? '$firstName $lastName' : name;
   }
+
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'username': username,
+        'uid': uid,
+        'accessUntil': accessUntil != null
+            ? accessUntil!.millisecondsSinceEpoch ~/ 1000
+            : null,
+        'accessRangeStart': accessRangeStart,
+        'accessRangeEnd': accessRangeEnd,
+        'firstname': firstName,
+        'lastname': lastName,
+        'displayname': googleDisplayName,
+        'hasNationalId': hasNationalId,
+        'isSystemAccount': isSystemAccount,
+        'role': role,
+        'accessToken': accessToken,
+        'expiresAt': expiresAt.millisecondsSinceEpoch ~/ 1000,
+      };
 
   factory TemporaryAccount.fromResponse(Object? response) {
     if (response is! Map) {
@@ -134,9 +157,12 @@ class TemporaryAccount {
 }
 
 class TemporaryAccountSession extends ChangeNotifier {
-  TemporaryAccountSession._();
+  TemporaryAccountSession._() {
+    _restoreFromStorage();
+  }
 
   static final instance = TemporaryAccountSession._();
+  static const _storageKey = 'kufixit_temporary_session';
 
   TemporaryAccount? _account;
   Timer? _expiryTimer;
@@ -149,12 +175,33 @@ class TemporaryAccountSession extends ChangeNotifier {
     return account;
   }
 
+  void _restoreFromStorage() {
+    try {
+      final raw = BrowserSessionStorage.instance.read(_storageKey);
+      if (raw == null || raw.isEmpty) return;
+      final json = jsonDecode(raw);
+      final account = TemporaryAccount.fromResponse(json);
+      _account = account;
+      final duration = account.expiresAt.difference(DateTime.now());
+      _expiryTimer = Timer(duration, clear);
+    } catch (_) {
+      BrowserSessionStorage.instance.remove(_storageKey);
+      _account = null;
+    }
+  }
+
   void setFromResponse(Object? response) {
     final account = TemporaryAccount.fromResponse(response);
     _expiryTimer?.cancel();
     _account = account;
     final duration = _account!.expiresAt.difference(DateTime.now());
     _expiryTimer = Timer(duration, clear);
+    try {
+      BrowserSessionStorage.instance.save(
+        _storageKey,
+        jsonEncode(_account!.toJson()),
+      );
+    } catch (_) {}
     notifyListeners();
   }
 
@@ -178,12 +225,21 @@ class TemporaryAccountSession extends ChangeNotifier {
       accessToken: account.accessToken,
       expiresAt: account.expiresAt,
     );
+    try {
+      BrowserSessionStorage.instance.save(
+        _storageKey,
+        jsonEncode(_account!.toJson()),
+      );
+    } catch (_) {}
     notifyListeners();
   }
 
   void clear() {
     _expiryTimer?.cancel();
     _expiryTimer = null;
+    try {
+      BrowserSessionStorage.instance.remove(_storageKey);
+    } catch (_) {}
     if (_account == null) return;
     _account = null;
     notifyListeners();

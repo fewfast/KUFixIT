@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
@@ -85,6 +86,7 @@ class ActivityLogPage extends StatefulWidget {
 class _ActivityLogPageState extends State<ActivityLogPage> {
   final TextEditingController _searchController = TextEditingController();
   late final RealtimeRefreshBinding _realtimeRefresh;
+  Timer? _pollingTimer;
 
   bool _isLoading = true;
   String? _error;
@@ -106,10 +108,16 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
       domains: const {
         RealtimeInvalidationDomain.accounts,
         RealtimeInvalidationDomain.tickets,
+        RealtimeInvalidationDomain.activityLogs,
       },
-      onRefresh: () => _loadLogs(),
+      onRefresh: () => _loadLogs(silent: true),
       isMounted: () => mounted,
     );
+    _pollingTimer = Timer.periodic(const Duration(seconds: 12), (_) {
+      if (mounted) {
+        _loadLogs(silent: true);
+      }
+    });
     _loadLogs();
   }
 
@@ -117,6 +125,8 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
   void dispose() {
     _searchController.dispose();
     _realtimeRefresh.dispose();
+    _pollingTimer?.cancel();
+    _pollingTimer = null;
     super.dispose();
   }
 
@@ -201,12 +211,14 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
     }
   }
 
-  Future<void> _loadLogs({int? targetPage}) async {
+  Future<void> _loadLogs({int? targetPage, bool silent = false}) async {
     final pageToLoad = targetPage ?? _page;
-    setState(() {
-      _isLoading = true;
-      _error = null;
-    });
+    if (!silent || _logs.isEmpty) {
+      setState(() {
+        _isLoading = true;
+        _error = null;
+      });
+    }
 
     final (startDate, endDate) = _resolveDateRange();
 
@@ -246,12 +258,15 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
         _totalCount = total;
         _totalPages = totalPages < 1 ? 1 : totalPages;
         _isLoading = false;
+        _error = null;
       });
     } catch (e) {
       if (!mounted) return;
       final msg = e.toString().replaceFirst('Exception: ', '');
       setState(() {
-        _error = msg;
+        if (!silent || _logs.isEmpty) {
+          _error = msg;
+        }
         _isLoading = false;
       });
     }
@@ -274,6 +289,24 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
       'technician' => Icons.handyman_outlined,
       'user' => Icons.person_outline,
       _ => Icons.info_outline,
+    };
+  }
+
+  IconData? _getActionIcon(String actionType) {
+    return switch (actionType) {
+      'CHANGE_USER_DISPLAY_NAME' => Icons.badge_outlined,
+      'CHANGE_DISPLAY_NAME' => Icons.drive_file_rename_outline,
+      'EDIT_TICKET' => Icons.edit_note_outlined,
+      'CREATE_TECH_TEAM' => Icons.group_add_outlined,
+      'SCHEDULE_TECH_TEAM' => Icons.schedule_outlined,
+      'DELETE_TECH_TEAM' => Icons.group_remove_outlined,
+      'REPORT_APPROVE' => Icons.check_circle_outline,
+      'REPORT_REJECT' => Icons.cancel_outlined,
+      'TECH_SUBMIT' => Icons.send_outlined,
+      'TICKET_ASSIGN' => Icons.assignment_ind_outlined,
+      'ROLE_CHANGE' || 'ROLE_CHANGE_APPROVE' || 'ROLE_CHANGE_REJECT' || 'USER_STATUS' =>
+        Icons.admin_panel_settings_outlined,
+      _ => null,
     };
   }
 
@@ -407,9 +440,15 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
               ),
             ),
             IconButton(
-              tooltip: 'รีเฟรชข้อมูล',
-              icon: const Icon(Icons.refresh),
-              onPressed: () => _loadLogs(),
+              tooltip: _isLoading ? 'กำลังโหลด...' : 'รีเฟรชข้อมูล',
+              icon: _isLoading
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.refresh),
+              onPressed: _isLoading ? null : () => _loadLogs(),
             ),
           ],
         ),
@@ -477,8 +516,8 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
                           child: Text('จัดการทีมช่าง'),
                         ),
                         DropdownMenuItem(
-                          value: 'CHANGE_DISPLAY_NAME',
-                          child: Text('เปลี่ยนชื่อที่แสดง'),
+                          value: 'CHANGE_DISPLAY_NAME,CHANGE_USER_DISPLAY_NAME',
+                          child: Text('เปลี่ยนชื่อที่แสดง (ตนเอง/ผู้อื่น)'),
                         ),
                         DropdownMenuItem(
                           value: 'REPORT_APPROVE,REPORT_REJECT',
@@ -721,18 +760,80 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(
-                          log.actionTitle,
-                          style: const TextStyle(
-                            fontSize: 15,
-                            fontWeight: FontWeight.bold,
-                          ),
+                        Row(
+                          children: [
+                            if (_getActionIcon(log.actionType) != null) ...[
+                              Icon(
+                                _getActionIcon(log.actionType),
+                                size: 18,
+                                color: roleColor,
+                              ),
+                              const SizedBox(width: 6),
+                            ],
+                            Expanded(
+                              child: Text(
+                                log.actionTitle,
+                                style: const TextStyle(
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
                         const SizedBox(height: 4),
                         Text(
                           log.description,
                           style: TextStyle(fontSize: 14, color: Colors.grey.shade800),
                         ),
+                        if (log.actionType == 'CHANGE_USER_DISPLAY_NAME' &&
+                            (log.metadata['old_display_name'] != null ||
+                                log.metadata['new_display_name'] != null)) ...[
+                          const SizedBox(height: 6),
+                          Wrap(
+                            spacing: 6,
+                            runSpacing: 4,
+                            crossAxisAlignment: WrapCrossAlignment.center,
+                            children: [
+                              Text(
+                                'ชื่อเดิม: ',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.grey.shade600,
+                                ),
+                              ),
+                              Text(
+                                '${log.metadata['old_display_name'] ?? '-'}',
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600,
+                                  color: Colors.red.shade700,
+                                  decoration: TextDecoration.lineThrough,
+                                ),
+                              ),
+                              const Icon(
+                                Icons.arrow_forward,
+                                size: 14,
+                                color: Colors.grey,
+                              ),
+                              Text(
+                                'ชื่อใหม่: ',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.grey.shade600,
+                                ),
+                              ),
+                              Text(
+                                '${log.metadata['new_display_name'] ?? '-'}',
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.bold,
+                                  color: Colors.green.shade700,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
                       ],
                     ),
                   ),

@@ -18,29 +18,165 @@
 
   <meta charset="UTF-8">
   <meta content="IE=Edge" http-equiv="X-UA-Compatible">
-  <meta name="description" content="A new Flutter project.">
+  <meta name="description" content="KUFixIT - ระบบแจ้งซ่อมและติดตามงานซ่อม">
 
   <!-- iOS meta tags & icons -->
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black">
-  <meta name="apple-mobile-web-app-title" content="mobileproject">
+  <meta name="apple-mobile-web-app-title" content="KUFixIT">
   <link rel="apple-touch-icon" href="icons/Icon-192.png">
 
   <!-- Favicon -->
   <link rel="icon" type="image/png" href="favicon.png"/>
 
-  <title>mobileproject</title>
+  <title>KUFixIT</title>
   <link rel="manifest" href="manifest.json">
+
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: #f8f9fa;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    }
+    #app-loading {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background-color: #ffffff;
+      z-index: 999999;
+      transition: opacity 0.25s ease-out;
+    }
+    .spinner {
+      width: 48px;
+      height: 48px;
+      border: 4px solid #e0e0e0;
+      border-top-color: #3f51b5;
+      border-radius: 50%;
+      animation: spin 0.9s linear infinite;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+    .loading-title {
+      margin-top: 24px;
+      font-size: 22px;
+      font-weight: 700;
+      color: #3f51b5;
+      letter-spacing: 0.5px;
+    }
+    .loading-subtitle {
+      margin-top: 8px;
+      font-size: 14px;
+      color: #616161;
+    }
+    #loading-fallback {
+      display: none;
+      margin-top: 24px;
+      text-align: center;
+      padding: 0 16px;
+    }
+    .fallback-text {
+      color: #d32f2f;
+      font-size: 14px;
+      margin-bottom: 12px;
+    }
+    .btn-reload {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background-color: #3f51b5;
+      color: #ffffff;
+      border: none;
+      border-radius: 8px;
+      padding: 10px 20px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.15);
+      transition: background-color 0.2s, transform 0.1s;
+    }
+    .btn-reload:hover {
+      background-color: #303f9f;
+    }
+    .btn-reload:active {
+      transform: scale(0.98);
+    }
+  </style>
 </head>
 <body>
-  <!--
-    You can customize the "flutter_bootstrap.js" script.
-    This is useful to provide a custom configuration to the Flutter loader
-    or to give the user feedback during the initialization process.
+  <div id="app-loading">
+    <div class="spinner"></div>
+    <div class="loading-title">KUFixIT</div>
+    <div class="loading-subtitle">กำลังโหลดระบบ...</div>
+    <div id="loading-fallback">
+      <div class="fallback-text">การเชื่อมต่อหรือการโหลดใช้เวลานานกว่าปกติ</div>
+      <button class="btn-reload" onclick="window.location.reload()">
+        <svg style="width:16px;height:16px;fill:currentColor" viewBox="0 0 24 24">
+          <path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/>
+        </svg>
+        รีเฟรชหน้านี้ใหม่
+      </button>
+    </div>
+  </div>
 
-    For more details:
-    * https://docs.flutter.dev/platform-integration/web/initialization
-  -->
+  <script>
+    (function() {
+      var loader = document.getElementById('app-loading');
+      var fallback = document.getElementById('loading-fallback');
+      var isDismissed = false;
+
+      function dismissLoader() {
+        if (isDismissed || !loader) return;
+        isDismissed = true;
+        loader.style.opacity = '0';
+        setTimeout(function() {
+          if (loader && loader.parentNode) {
+            loader.parentNode.removeChild(loader);
+          }
+        }, 260);
+      }
+
+      // Event triggered when Flutter renders the first frame
+      window.addEventListener('flutter-first-frame', dismissLoader);
+
+      // Mutation observer to detect when Flutter mounts flutter-view or flt-glass-pane
+      var observer = new MutationObserver(function(mutations) {
+        for (var i = 0; i < mutations.length; i++) {
+          for (var j = 0; j < mutations[i].addedNodes.length; j++) {
+            var node = mutations[i].addedNodes[j];
+            if (node && (node.nodeName === 'FLUTTER-VIEW' || (node.className && typeof node.className === 'string' && node.className.indexOf('flt-glass-pane') !== -1))) {
+              dismissLoader();
+              observer.disconnect();
+              return;
+            }
+          }
+        }
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+
+      // Fallback timer: if after 9s Flutter has not rendered, show reload prompt
+      setTimeout(function() {
+        if (!isDismissed && fallback) {
+          fallback.style.display = 'block';
+        }
+      }, 9000);
+
+      // Uncaught error handler to surface reload button if bootstrap script fails
+      window.addEventListener('error', function(e) {
+        if (!isDismissed && fallback) {
+          fallback.style.display = 'block';
+        }
+      });
+    })();
+  </script>
+
   <script src="flutter_bootstrap.js" async></script>
 </body>
 </html>
