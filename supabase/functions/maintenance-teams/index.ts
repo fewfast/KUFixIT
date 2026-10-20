@@ -217,6 +217,10 @@ Deno.serve(async (request) => {
   const supabase = createClient(supabaseUrl, serviceRoleKey, {
     auth: { autoRefreshToken: false, persistSession: false },
   });
+  let adminUid = claims.sub;
+  let adminRole = String(claims.role);
+  let adminDisplayName = claims.sub;
+
   try {
     const isSystemAccount = claims.username === claims.sub;
     const { data: account, error } = isSystemAccount
@@ -227,7 +231,7 @@ Deno.serve(async (request) => {
         .maybeSingle()
       : await supabase
         .from("Users")
-        .select("role, status")
+        .select("uid, role, status, \"Display Name\"")
         .eq("google_auth_user_id", claims.sub)
         .maybeSingle();
     if (error) throw error;
@@ -241,6 +245,17 @@ Deno.serve(async (request) => {
     if (!currentlyAdmin) {
       return jsonResponse(403, { error: "หน้านี้สำหรับผู้ดูแลระบบเท่านั้น" });
     }
+
+    adminUid = isSystemAccount
+      ? claims.sub
+      : (typeof account?.uid === "string" ? account.uid : claims.sub);
+    adminRole = (typeof account?.role === "string" ? account.role : null) ??
+      String(claims.role);
+    adminDisplayName = isSystemAccount
+      ? claims.sub
+      : (typeof account?.["Display Name"] === "string" && account["Display Name"]
+        ? account["Display Name"]
+        : adminUid);
   } catch (error) {
     console.error("Failed to verify current maintenance administrator.", error);
     return jsonResponse(500, {
@@ -509,6 +524,25 @@ Deno.serve(async (request) => {
       if (!updatedTicket) {
         return jsonResponse(404, { error: "ไม่พบ ticket ใน FixList" });
       }
+
+      await supabase.from("activity_logs").insert({
+        actor_username: adminUid,
+        actor_role: adminRole,
+        actor_display_name: adminDisplayName,
+        action_type: "EDIT_TICKET",
+        action_title: "แก้ไขคำร้องแจ้งซ่อม",
+        description: `แอดมินแก้ไขข้อมูลสถานที่คำร้อง Ticket #${ticketId}`,
+        target_id: ticketId,
+        metadata: {
+          uid: adminUid,
+          ticket_id: ticketId,
+          building,
+          area: building === "other" ? (area as string).trim() : null,
+          floor: typeof floor === "string" && floor.trim() ? floor.trim() : null,
+          room: typeof room === "string" && room.trim() ? room.trim() : null,
+        },
+      });
+
       return jsonResponse(200, { updated: true });
     }
 
@@ -551,6 +585,23 @@ Deno.serve(async (request) => {
       if (!updatedDevice) {
         return jsonResponse(404, { error: "ไม่พบรายการอุปกรณ์ของ ticket นี้" });
       }
+
+      await supabase.from("activity_logs").insert({
+        actor_username: adminUid,
+        actor_role: adminRole,
+        actor_display_name: adminDisplayName,
+        action_type: "EDIT_TICKET",
+        action_title: "แก้ไขคำร้องแจ้งซ่อม",
+        description: `แอดมินแก้ไขข้อมูลอุปกรณ์คำร้อง Ticket #${ticketId}`,
+        target_id: ticketId,
+        metadata: {
+          uid: adminUid,
+          ticket_id: ticketId,
+          device_id: deviceId,
+          device: device.trim() || null,
+        },
+      });
+
       return jsonResponse(200, { updated: true });
     }
 
@@ -617,6 +668,22 @@ Deno.serve(async (request) => {
       if (!validateTechnicianUid(resolvedUid)) {
         throw new Error("Technician creation returned an invalid UID.");
       }
+
+      await supabase.from("activity_logs").insert({
+        actor_username: adminUid,
+        actor_role: adminRole,
+        actor_display_name: adminDisplayName,
+        action_type: "CREATE_TECH_TEAM",
+        action_title: "สร้างบัญชีทีมช่าง",
+        description: `แอดมินสร้างทีมช่าง ${teamName}`,
+        target_id: resolvedUid,
+        metadata: {
+          uid: adminUid,
+          team_name: teamName,
+          username,
+        },
+      });
+
       return jsonResponse(200, {
         uid: resolvedUid,
         username,
@@ -687,6 +754,17 @@ Deno.serve(async (request) => {
       if (Object.keys(update).length === 0) {
         return jsonResponse(200, { success: true });
       }
+
+      let currentTeamName = typeof update.teamName === "string" ? update.teamName : null;
+      if ("dateRanges" in payload && !currentTeamName) {
+        const { data: techRow } = await supabase
+          .from("Maintenance_Users")
+          .select("teamName")
+          .eq("uid", uid)
+          .maybeSingle();
+        currentTeamName = techRow?.teamName ?? uid;
+      }
+
       const { data, error } = await supabase
         .from("Maintenance_Users")
         .update(update)
@@ -695,6 +773,24 @@ Deno.serve(async (request) => {
         .maybeSingle();
       if (error) throw error;
       if (!data) return jsonResponse(404, { error: "ไม่พบบัญชีช่างที่ต้องการแก้ไข" });
+
+      if ("dateRanges" in payload) {
+        await supabase.from("activity_logs").insert({
+          actor_username: adminUid,
+          actor_role: adminRole,
+          actor_display_name: adminDisplayName,
+          action_type: "SCHEDULE_TECH_TEAM",
+          action_title: "กำหนดช่วงเวลาปฏิบัติงานช่าง",
+          description: `แอดมินแก้ไขช่วงเวลาปฏิบัติงานของทีม ${currentTeamName ?? uid}`,
+          target_id: uid,
+          metadata: {
+            uid: adminUid,
+            team_name: currentTeamName ?? "",
+            date_ranges: payload.dateRanges,
+          },
+        });
+      }
+
       return jsonResponse(200, { success: true });
     }
 
@@ -703,6 +799,13 @@ Deno.serve(async (request) => {
       if (!validateTechnicianUid(uid)) {
         return jsonResponse(400, { error: "กรุณาตรวจสอบ UID ของบัญชีช่าง" });
       }
+
+      const { data: techToDelete } = await supabase
+        .from("Maintenance_Users")
+        .select("teamName, username")
+        .eq("uid", uid)
+        .maybeSingle();
+
       const { data, error } = await supabase.rpc(
         "delete_maintenance_technician",
         { p_technician_uid: uid },
@@ -723,6 +826,22 @@ Deno.serve(async (request) => {
       if (data !== true) {
         return jsonResponse(404, { error: "ไม่พบบัญชีช่างที่ต้องการลบ" });
       }
+
+      await supabase.from("activity_logs").insert({
+        actor_username: adminUid,
+        actor_role: adminRole,
+        actor_display_name: adminDisplayName,
+        action_type: "DELETE_TECH_TEAM",
+        action_title: "ลบบัญชีทีมช่าง",
+        description: `แอดมินลบบัญชีทีมช่าง ${techToDelete?.teamName ?? uid}`,
+        target_id: uid,
+        metadata: {
+          uid: adminUid,
+          team_name: techToDelete?.teamName ?? "",
+          username: techToDelete?.username ?? "",
+        },
+      });
+
       return jsonResponse(200, { deleted: true });
     }
 

@@ -241,10 +241,10 @@ class _LayoutState extends State<Layout> with WidgetsBindingObserver {
           for (final page in pages)
             if (page.id == 'ticket_monitor' ||
                 ((role == 'User' || role == 'Admin') && page.id == 'dashboard'))
-              TicketMonitor(adminMode: role == 'Admin')
+              TicketMonitor(adminMode: role == 'Admin' || role == 'SuperAdmin')
             else if (role == 'SuperAdmin' &&
                 (page.id == 'requests' || page.id == 'dashboard'))
-              const TicketMonitor(adminMode: false)
+              TicketMonitor(adminMode: role == 'Admin' || role == 'SuperAdmin')
             else if (page.id == 'my_requests')
               const TicketMonitor(myRequests: true)
             else if (page.id == 'new_request')

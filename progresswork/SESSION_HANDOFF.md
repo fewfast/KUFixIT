@@ -292,4 +292,123 @@
   - `flutter test`: all 66 tests passed.
 
 
+## Temporary & Junk Files Cleanup (2026-10-20)
+- **Deleted Artifacts**:
+  - Removed Android Emulator dump: `bugreport-*.zip` (~10 MB freed).
+  - Removed 0-byte image placeholder: `flutter_01.png`.
+  - Removed temporary Supabase CLI cache and dependencies: `supabase/.temp/`.
+  - Removed legacy unused Cloud Functions test folder: `functions/` (and its nested old `node_modules`).
+- **Preserved**:
+  - All application code (`lib/`, `test/`), active Edge Functions (`supabase/functions/`), migrations (`supabase/migrations/`), configurations, and environment secrets.
+- **Verification**:
+  - `flutter test --no-pub`: all 66 tests passed.
 
+
+## Sync Ticket Schedule on Technician Update (2026-10-20)
+- **Requirement**: When Admin updates technician working periods (`start_time` / `end_time`) or active `status` in `TechnicianManager`, all `pending` tickets assigned to that team must automatically and immediately update their upcoming repair window (`next_fix_date_start`, `next_fix_date_end`) and device repair dates to match the new technician schedule.
+- **Database Migration (`20261024000010_sync_ticket_schedule_on_technician_update.sql`)**:
+  - Created `public.sync_tickets_on_technician_schedule_update()` function:
+    - Triggered `AFTER UPDATE OF start_time, end_time, status ON public."Maintenance_Users" FOR EACH ROW`.
+    - Detects whether `start_time`, `end_time`, or `status` changed.
+    - If valid future periods exist: finds the nearest future repair period (accounting for full-day boundary `+ interval '1 day' > now()`), updates `FixList` and the dynamic ticket device table (`next_fix_date`), and logs activity `TICKET_RESCHEDULE` ("ปรับช่วงเวลาซ่อมตามช่าง").
+    - If no future period exists or team is deactivated: reverts tickets to `validating`, removes technician team, resets dates, unlinks assignment in technician assignment table, and logs activity `TICKET_AUTO_REVERT` ("หมดช่วงเวลาปฏิบัติงานช่าง").
+  - Linked to project `vmgzyenvqsfhcuropzjd` and applied migration cleanly via `supabase db push --linked`.
+- **UI Enhancements (`lib/gui/activity_log_page.dart`)**:
+  - Added filter dropdown item `TICKET_RESCHEDULE` ("ปรับช่วงเวลาซ่อมตามช่าง") in `ActivityLogPage`.
+- **Verification**:
+  - `supabase db push --dry-run --linked`: verified 100% clean.
+  - `supabase db push --linked`: migration applied successfully.
+  - `flutter analyze lib/gui/activity_log_page.dart test/`: passed (0 issues).
+  - `flutter test --no-pub`: all 66 tests passed.
+
+
+## Friendly Network Error & Retry Refresh on TicketMonitor (2026-10-20)
+- **Problem**: When a network hiccup or socket drop occurred during ticket loading (e.g., `FunctionsFetchException(status: 0, details: ClientException: Connection reset by peer)`), the raw exception object was printed directly to the screen. Users were confused and had no retry button, forcing an app restart.
+- **Resolution**:
+  - **Error Classification Helper (`lib/gui/ticket_load_error_message.dart`)**:
+    - Created `TicketLoadErrorInfo` and `formatTicketLoadError(error)`:
+      - **Network/Socket drops** (`FunctionsFetchException`, `ClientException`, `SocketException`, `status: 0`, timeout, peer reset): returns Title: `"ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้"`, Message: `"สัญญาณอินเทอร์เน็ตอาจขัดข้องหรือหลุดระหว่างดาวน์โหลดข้อมูล กรุณาตรวจสอบการเชื่อมต่อแล้วลองใหม่อีกครั้ง"`, `isNetworkError: true`.
+      - **Server 5xx / Relay errors** (`FunctionsHttpException` 5xx, `FunctionsRelayException`): returns Title: `"ระบบเซิร์ฟเวอร์ขัดข้องชั่วคราว"`, Message: `"ระบบเซิร์ฟเวอร์ไม่สามารถตอบสนองได้ชั่วคราว กรุณาลองใหม่อีกครั้งภายหลัง"`.
+      - **Format / Other errors**: returns Title: `"เกิดข้อผิดพลาดในการโหลดรายการ"`, Message: `"เกิดข้อผิดพลาดในการโหลดรายการ กรุณาลองใหม่อีกครั้ง"`.
+      - Preserves full `rawDetails` string for diagnostics.
+  - **User-Friendly Error Card UI (`lib/gui/ticketMonitor.dart`)**:
+    - In `_buildTable()`, displays a clean centered card:
+      - Icon: `Icons.wifi_off_rounded` (for network errors) or `Icons.cloud_off_rounded` (for server errors).
+      - Prominent `FilledButton.icon` with `Icons.refresh` ("ลองใหม่อีกครั้ง") which immediately calls `_loadTickets()`.
+      - Expandable `TextButton` ("ดูรายละเอียดข้อผิดพลาด" / "ซ่อนรายละเอียดทางเทคนิค") revealing the raw technical stack/message in a selectable monospace box.
+  - **Widget Testing Support**:
+    - Added optional `fetchTickets` callback on `TicketMonitor` for deterministic, offline testing of error states and retry behavior.
+- **Testing & Verification**:
+  - Added unit tests: `test/gui/ticket_load_error_message_test.dart` (6 test cases).
+  - Added widget tests: `test/gui/ticket_monitor_error_ui_test.dart` (2 test cases verifying network error card, expand/collapse details, retry reload, and 500 server error).
+  - `flutter analyze lib/gui/ticketMonitor.dart lib/gui/ticket_load_error_message.dart test/`: passed with 0 issues.
+  - `flutter test --no-pub`: all 74 unit and widget tests passed 100%.
+
+
+
+
+
+
+
+
+## Activity Logging System Refinement (2026-10-20)
+- **Objective:** Strictly align Activity Logging with role-specific requirements across database functions/triggers, Edge Functions, and SuperAdmin UI (`lib/gui/activity_log_page.dart`).
+- **Database Migration:**
+  - Added and pushed migration `20261024000011_refine_activity_logging_rules.sql` to linked project `vmgzyenvqsfhcuropzjd`.
+  - Removed `public.log_activity('system', ...)` from `check_and_expire_overdue_tickets()` and `sync_tickets_on_technician_schedule_update()`.
+  - Purged all legacy and automated system activity logs (`actor_role ILIKE 'system'` or `action_type IN ('TICKET_AUTO_REVERT', 'TICKET_RESCHEDULE')`).
+- **Edge Functions:**
+  - `update-user-profile`: Records `CHANGE_DISPLAY_NAME` when user or admin modifies display name, logging `actor_username = user.uid`, `actor_role`, `actor_display_name = newName`, `description = 'ผู้ใช้งานเปลี่ยนชื่อที่แสดงเป็น [ชื่อใหม่]'` (or Admin/SuperAdmin equivalent), `target_id = user.uid`, and metadata `{ old_name, new_name }`.
+  - `maintenance-teams`:
+    - `create-technician`: records `CREATE_TECH_TEAM` with `target_id = techUid` and metadata `{ team_name, username }`.
+    - `update-technician`: records `SCHEDULE_TECH_TEAM` when `dateRanges` is updated, logging `target_id = techUid` and metadata `{ team_name, date_ranges }`.
+    - `delete-technician`: records `DELETE_TECH_TEAM` with `target_id = techUid` and metadata `{ team_name, username }`.
+    - `update-assigned-ticket` & `update-assigned-device`: records `EDIT_TICKET` for Admin edits.
+  - `list-public-tickets`:
+    - `admin-update-ticket`: records `EDIT_TICKET` for Admin edits (ticket status, team assignment, schedule, location).
+  - Deployed `update-user-profile`, `maintenance-teams`, and `list-public-tickets` to Supabase.
+- **UI (`lib/gui/activity_log_page.dart`):**
+  - Removed `'System'` from the Role filter dropdown (retained `ALL`, `SuperAdmin`, `Admin`, `Technician`, `User`).
+  - Updated Action Type filter dropdown to include:
+    - `'EDIT_TICKET'` ('แก้ไขคำร้องแจ้งซ่อม')
+    - `'CREATE_TECH_TEAM,SCHEDULE_TECH_TEAM,DELETE_TECH_TEAM'` ('จัดการทีมช่าง')
+    - `'CHANGE_DISPLAY_NAME'` ('เปลี่ยนชื่อที่แสดง')
+    - Retained SuperAdmin & Technician actions: `'REPORT_APPROVE,REPORT_REJECT'`, `'TICKET_ASSIGN'`, `'ROLE_CHANGE,...'`, `'TECH_SUBMIT'`.
+    - Removed `'TICKET_AUTO_REVERT'` and `'TICKET_RESCHEDULE'`.
+  - Added dedicated role icon and badge styling for `User` role (`Icons.person_outline`, `Colors.green.shade700`).
+  - Updated `_formatActorHeader` to support `User` role format: `[DisplayName] (uid)`.
+- **Verification:**
+  - `flutter analyze`: 0 errors.
+  - `flutter test --no-pub`: all 74 unit/widget tests passed.
+
+
+## Ticket Monitor Requester Info & Search System (2026-10-20)
+- **Objective:** Display requester details and enable search by TicketId, Requester UID, or Requester Display Name in `TicketMonitor` for Admin and SuperAdmin roles.
+- **Backend (`supabase/functions/list-public-tickets/index.ts`):**
+  - Updated `action === "admin-tickets"`:
+    - Queries `requester` from `FixList`.
+    - Looks up `"Display Name"` from `public."Users"` where `Users.uid = FixList.requester`.
+    - Returns `requester_uid` and `requester_display_name` on each ticket object.
+  - Search logic update:
+    - Replaced numeric-only constraint (`!/^\d*$/.test(ticketId)`) with generic search string (length <= 100).
+    - Queries `public."Users"` in parallel for matching `uid` or `"Display Name"` (`ilike %search%`), gathering `matchedRequesterUids`.
+    - Filters `FixList` where `TicketId ilike %search%` OR `requester ilike %search%` OR `requester in (matchedRequesterUids)`.
+  - Deployed `list-public-tickets` function to Supabase.
+- **Frontend:**
+  - `lib/gui/layout.dart`:
+    - Updated `TicketMonitor` instantiation for SuperAdmin: `TicketMonitor(adminMode: role == 'Admin' || role == 'SuperAdmin')`.
+  - `lib/gui/ticketMonitor.dart`:
+    - Extended `_Ticket` class with `final String? requesterUid` and `final String? requesterDisplayName`.
+    - Updated `_Ticket.fromJson` parser with validation and extraction.
+    - Updated `_buildTicketDetailsHeading` to display:
+      `ผู้ส่งคำร้อง ${widget.ticket.requesterDisplayName ?? '-'}(${widget.ticket.requesterUid ?? '-'})`
+      beside "อุปกรณ์ย่อย" when `widget.adminMode` is true.
+    - Search text field updates:
+      - `labelText`: `widget.adminMode ? 'ค้นหา TicketId, UID หรือชื่อผู้ส่งคำร้อง' : 'ค้นหา TicketId'`
+      - `hintText`: `widget.adminMode ? 'กรอก TicketId, UID หรือชื่อผู้ส่งคำร้อง' : 'กรอก TicketId'`
+      - `keyboardType`: `widget.adminMode ? TextInputType.text : TextInputType.number`
+- **Testing & Verification:**
+  - Added `test/gui/ticket_monitor_requester_test.dart` testing admin vs non-admin mode requester display and search UI.
+  - Updated `test/widget_test.dart` search expectation for Admin role.
+  - `flutter analyze`: 0 errors.
+  - `flutter test --no-pub`: all 76 tests passed.

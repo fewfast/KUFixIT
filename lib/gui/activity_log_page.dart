@@ -263,8 +263,17 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
       'admin' => Colors.blue.shade700,
       'technician' => Colors.orange.shade800,
       'user' => Colors.green.shade700,
-      'system' => Colors.teal.shade700,
       _ => Colors.grey.shade700,
+    };
+  }
+
+  IconData _getRoleIcon(String role) {
+    return switch (role.toLowerCase()) {
+      'superadmin' => Icons.shield_outlined,
+      'admin' => Icons.manage_accounts_outlined,
+      'technician' => Icons.handyman_outlined,
+      'user' => Icons.person_outline,
+      _ => Icons.info_outline,
     };
   }
 
@@ -460,6 +469,18 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
                       items: const [
                         DropdownMenuItem(value: 'ALL', child: Text('ประเภท: ทั้งหมด')),
                         DropdownMenuItem(
+                          value: 'EDIT_TICKET',
+                          child: Text('แก้ไขคำร้องแจ้งซ่อม'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'CREATE_TECH_TEAM,SCHEDULE_TECH_TEAM,DELETE_TECH_TEAM',
+                          child: Text('จัดการทีมช่าง'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'CHANGE_DISPLAY_NAME',
+                          child: Text('เปลี่ยนชื่อที่แสดง'),
+                        ),
+                        DropdownMenuItem(
                           value: 'REPORT_APPROVE,REPORT_REJECT',
                           child: Text('ตรวจงานช่าง (อนุมัติ/ปฏิเสธ)'),
                         ),
@@ -469,7 +490,6 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
                           child: Text('จัดการสิทธิ์และผู้ใช้'),
                         ),
                         DropdownMenuItem(value: 'TECH_SUBMIT', child: Text('ส่งงานช่าง')),
-                        DropdownMenuItem(value: 'TICKET_AUTO_REVERT', child: Text('คืนงานซ่อม (หมดเวลา)')),
                       ],
                       onChanged: (val) {
                         if (val == null) return;
@@ -495,7 +515,6 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
                         DropdownMenuItem(value: 'Admin', child: Text('Admin')),
                         DropdownMenuItem(value: 'Technician', child: Text('Technician')),
                         DropdownMenuItem(value: 'User', child: Text('User')),
-                        DropdownMenuItem(value: 'System', child: Text('System (ระบบ)')),
                       ],
                       onChanged: (val) {
                         if (val == null) return;
@@ -616,6 +635,12 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
           ? displayName
           : username;
       return '$name ($uid)';
+    } else if (role == 'User') {
+      // User: แสดง "[DisplayName] (uid)"
+      final name = (displayName != null && displayName.isNotEmpty)
+          ? displayName
+          : username;
+      return '$name ($uid)';
     }
 
     // บทบาทอื่นๆ
@@ -651,13 +676,20 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
                       borderRadius: BorderRadius.circular(6),
                       border: Border.all(color: roleColor.withValues(alpha: 0.4)),
                     ),
-                    child: Text(
-                      log.actorRole,
-                      style: TextStyle(
-                        color: roleColor,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 12,
-                      ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(_getRoleIcon(log.actorRole), size: 13, color: roleColor),
+                        const SizedBox(width: 4),
+                        Text(
+                          log.actorRole,
+                          style: TextStyle(
+                            color: roleColor,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                   const SizedBox(width: 8),

@@ -119,7 +119,7 @@ void main() {
     );
 
     expect(find.text('ติดตามงานซ่อม'), findsOneWidget);
-    expect(find.text('ค้นหา TicketId'), findsOneWidget);
+    expect(find.text('ค้นหา TicketId, UID หรือชื่อผู้ส่งคำร้อง'), findsOneWidget);
     expect(find.text('กรุณาเข้าสู่ระบบด้วยบัญชีผู้ดูแลระบบ'), findsOneWidget);
 
     await tester.tap(find.byTooltip('เปิดเมนู'));

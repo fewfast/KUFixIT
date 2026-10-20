@@ -9,19 +9,32 @@ import '../database/connect.dart';
 import '../database/realtime_invalidation.dart';
 import 'building_locations.dart';
 import 'ticket_schedule_serialization.dart';
+import 'ticket_load_error_message.dart';
 import 'ticket_update_error_message.dart';
 
 const _ticketLocationMapCenter = latlong.LatLng(13.1209646, 100.9192182);
+
+typedef FetchTicketsFn = Future<Map<String, dynamic>> Function({
+  required bool myRequests,
+  required bool adminMode,
+  required String ticketId,
+  required int page,
+  required int pageSize,
+  required String sortBy,
+  required bool sortAscending,
+});
 
 class TicketMonitor extends StatefulWidget {
   const TicketMonitor({
     super.key,
     this.myRequests = false,
     this.adminMode = false,
+    this.fetchTickets,
   });
 
   final bool myRequests;
   final bool adminMode;
+  final FetchTicketsFn? fetchTickets;
 
   @override
   State<TicketMonitor> createState() => _TicketMonitorState();
@@ -47,6 +60,8 @@ class _TicketMonitorState extends State<TicketMonitor> {
   };
   bool _isLoading = true;
   String? _errorMessage;
+  TicketLoadErrorInfo? _errorInfo;
+  bool _showErrorDetails = false;
   late final RealtimeRefreshBinding _realtimeRefresh;
 
   @override
@@ -82,6 +97,8 @@ class _TicketMonitorState extends State<TicketMonitor> {
       _tickets = const [];
       _isLoading = true;
       _errorMessage = null;
+      _errorInfo = null;
+      _showErrorDetails = false;
     });
     _searchTimer = Timer(const Duration(milliseconds: 350), _loadTickets);
   }
@@ -158,7 +175,9 @@ class _TicketMonitorState extends State<TicketMonitor> {
     _searchTimer?.cancel();
     final requestVersion = ++_requestVersion;
     final account = TemporaryAccountSession.instance.account;
-    if ((widget.myRequests || widget.adminMode) && account == null) {
+    if ((widget.myRequests || widget.adminMode) &&
+        account == null &&
+        widget.fetchTickets == null) {
       setState(() {
         _tickets = const [];
         _total = 0;
@@ -166,15 +185,17 @@ class _TicketMonitorState extends State<TicketMonitor> {
         _errorMessage = widget.adminMode
             ? 'กรุณาเข้าสู่ระบบด้วยบัญชีผู้ดูแลระบบ'
             : 'กรุณาเข้าสู่ระบบเพื่อดูรายการแจ้งซ่อมของคุณ';
+        _errorInfo = null;
       });
       return;
     }
-    if (!SupabaseConnection.isInitialized) {
+    if (!SupabaseConnection.isInitialized && widget.fetchTickets == null) {
       setState(() {
         _tickets = const [];
         _total = 0;
         _isLoading = false;
         _errorMessage = 'ยังไม่ได้เชื่อมต่อ Supabase';
+        _errorInfo = null;
       });
       return;
     }
@@ -182,44 +203,66 @@ class _TicketMonitorState extends State<TicketMonitor> {
     setState(() {
       _isLoading = true;
       _errorMessage = null;
+      _errorInfo = null;
+      _showErrorDetails = false;
     });
 
     try {
-      final response = await SupabaseConnection.client.functions.invoke(
-        'list-public-tickets',
-        headers: widget.myRequests || widget.adminMode
-            ? {'Authorization': 'Bearer ${account!.accessToken}'}
-            : null,
-        body: {
-          if (widget.myRequests) 'action': 'my-tickets',
-          if (widget.adminMode) 'action': 'admin-tickets',
-          'ticketId': ticketId,
-          'page': _page,
-          'pageSize': _pageSize,
-          'sortBy': _sortColumn,
-          'sortAscending': _sortAscending,
-        },
-      );
-      final data = response.data;
-      if (data is! Map || data['tickets'] is! List || data['total'] is! int) {
+      final Map<String, dynamic> data;
+      if (widget.fetchTickets != null) {
+        data = await widget.fetchTickets!(
+          myRequests: widget.myRequests,
+          adminMode: widget.adminMode,
+          ticketId: ticketId,
+          page: _page,
+          pageSize: _pageSize,
+          sortBy: _sortColumn,
+          sortAscending: _sortAscending,
+        );
+      } else {
+        final response = await SupabaseConnection.client.functions.invoke(
+          'list-public-tickets',
+          headers: widget.myRequests || widget.adminMode
+              ? {'Authorization': 'Bearer ${account!.accessToken}'}
+              : null,
+          body: {
+            if (widget.myRequests) 'action': 'my-tickets',
+            if (widget.adminMode) 'action': 'admin-tickets',
+            'ticketId': ticketId,
+            'page': _page,
+            'pageSize': _pageSize,
+            'sortBy': _sortColumn,
+            'sortAscending': _sortAscending,
+          },
+        );
+        final responseData = response.data;
+        if (responseData is! Map) {
+          throw const FormatException('รูปแบบข้อมูลรายการ Ticket ไม่ถูกต้อง');
+        }
+        data = Map<String, dynamic>.from(responseData);
+      }
+      if (data['tickets'] is! List || data['total'] is! int) {
         throw const FormatException('รูปแบบข้อมูลรายการ Ticket ไม่ถูกต้อง');
       }
       final tickets = (data['tickets'] as List)
-          .map(_Ticket.fromJson)
+          .map((item) => _Ticket.fromJson(item as Map))
           .toList(growable: false);
       if (!mounted || requestVersion != _requestVersion) return;
       setState(() {
         _tickets = _sortTickets(tickets);
         _total = data['total'] as int;
         _isLoading = false;
+        _errorInfo = null;
+        _showErrorDetails = false;
       });
-    } on Exception catch (error) {
+    } catch (error) {
       if (!mounted || requestVersion != _requestVersion) return;
       setState(() {
         _tickets = const [];
         _total = 0;
         _isLoading = false;
-        _errorMessage = 'โหลดรายการ Ticket ไม่สำเร็จ: $error';
+        _errorInfo = formatTicketLoadError(error);
+        _showErrorDetails = false;
       });
     }
   }
@@ -249,8 +292,12 @@ class _TicketMonitorState extends State<TicketMonitor> {
           TextField(
             controller: _searchController,
             decoration: InputDecoration(
-              labelText: 'ค้นหา TicketId',
-              hintText: 'กรอก TicketId',
+              labelText: widget.adminMode
+                  ? 'ค้นหา TicketId, UID หรือชื่อผู้ส่งคำร้อง'
+                  : 'ค้นหา TicketId',
+              hintText: widget.adminMode
+                  ? 'กรอก TicketId, UID หรือชื่อผู้ส่งคำร้อง'
+                  : 'กรอก TicketId',
               prefixIcon: const Icon(Icons.search),
               suffixIcon: _searchController.text.isEmpty
                   ? null
@@ -283,7 +330,8 @@ class _TicketMonitorState extends State<TicketMonitor> {
               ),
             ),
             textAlignVertical: TextAlignVertical.center,
-            keyboardType: TextInputType.number,
+            keyboardType:
+                widget.adminMode ? TextInputType.text : TextInputType.number,
             onChanged: _onSearchChanged,
             onSubmitted: (_) => _loadTickets(),
           ),
@@ -343,6 +391,135 @@ class _TicketMonitorState extends State<TicketMonitor> {
   Widget _buildTable(BuildContext context) {
     if (_isLoading && _tickets.isEmpty) {
       return const Center(child: CircularProgressIndicator());
+    }
+    if (_errorInfo case final errorInfo?) {
+      final colors = Theme.of(context).colorScheme;
+      final textTheme = Theme.of(context).textTheme;
+      return Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 480),
+            child: Card(
+              elevation: 0,
+              color: colors.surfaceContainerLowest,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+                side: BorderSide(
+                  color: colors.outlineVariant.withValues(alpha: 0.5),
+                ),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.all(28),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        color: (errorInfo.isNetworkError
+                                ? colors.errorContainer
+                                : colors.secondaryContainer)
+                            .withValues(alpha: 0.35),
+                        shape: BoxShape.circle,
+                      ),
+                      child: Icon(
+                        errorInfo.isNetworkError
+                            ? Icons.wifi_off_rounded
+                            : Icons.cloud_off_rounded,
+                        size: 48,
+                        color: errorInfo.isNetworkError
+                            ? colors.error
+                            : colors.onSecondaryContainer,
+                      ),
+                    ),
+                    const SizedBox(height: 18),
+                    Text(
+                      errorInfo.title,
+                      style: textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.bold,
+                        color: colors.onSurface,
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+                    const SizedBox(height: 10),
+                    Text(
+                      errorInfo.message,
+                      style: textTheme.bodyMedium?.copyWith(
+                        color: colors.onSurfaceVariant,
+                        height: 1.4,
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+                    const SizedBox(height: 24),
+                    FilledButton.icon(
+                      onPressed: _isLoading ? null : _loadTickets,
+                      icon: _isLoading
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.refresh),
+                      label: Text(_isLoading ? 'กำลังโหลด...' : 'ลองใหม่อีกครั้ง'),
+                      style: FilledButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 24,
+                          vertical: 12,
+                        ),
+                      ),
+                    ),
+                    if (errorInfo.rawDetails.isNotEmpty) ...[
+                      const SizedBox(height: 12),
+                      TextButton.icon(
+                        onPressed: () => setState(() {
+                          _showErrorDetails = !_showErrorDetails;
+                        }),
+                        icon: Icon(
+                          _showErrorDetails
+                              ? Icons.keyboard_arrow_up
+                              : Icons.keyboard_arrow_down,
+                          size: 18,
+                        ),
+                        label: Text(
+                          _showErrorDetails
+                              ? 'ซ่อนรายละเอียดทางเทคนิค'
+                              : 'ดูรายละเอียดข้อผิดพลาด',
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                      ),
+                      if (_showErrorDetails) ...[
+                        const SizedBox(height: 8),
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: colors.surfaceContainerHighest
+                                .withValues(alpha: 0.5),
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(
+                              color:
+                                  colors.outlineVariant.withValues(alpha: 0.5),
+                            ),
+                          ),
+                          child: SelectableText(
+                            errorInfo.rawDetails,
+                            style: TextStyle(
+                              fontFamily: 'monospace',
+                              fontSize: 11,
+                              color: colors.onSurfaceVariant,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
     }
     if (_errorMessage case final error?) {
       return Center(
@@ -1126,14 +1303,28 @@ class _ExpandableTicketRowState extends State<_ExpandableTicketRow> {
       color: colors.surfaceContainerLow,
       child: Row(
         children: [
-          Expanded(
-            child: Text(
-              _showRepairHistory ? 'ประวัติการซ่อม' : 'อุปกรณ์ย่อย',
-              style: Theme.of(
-                context,
-              ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
-            ),
+          Text(
+            _showRepairHistory ? 'ประวัติการซ่อม' : 'อุปกรณ์ย่อย',
+            style: Theme.of(
+              context,
+            ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
           ),
+          if (widget.adminMode &&
+              (widget.ticket.requesterDisplayName != null ||
+                  widget.ticket.requesterUid != null)) ...[
+            const SizedBox(width: 12),
+            Flexible(
+              child: Text(
+                'ผู้ส่งคำร้อง ${widget.ticket.requesterDisplayName ?? '-'}(${widget.ticket.requesterUid ?? '-'})',
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  fontWeight: FontWeight.w600,
+                ),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ],
+          const Spacer(),
           if (widget.adminMode)
             IconButton(
               tooltip: widget.ticket.status == 'cancel'
@@ -2409,6 +2600,8 @@ class _Ticket {
     required this.nextFixDateEnd,
     required this.status,
     required this.technicianTeam,
+    this.requesterUid,
+    this.requesterDisplayName,
   });
 
   final String ticketId;
@@ -2423,6 +2616,8 @@ class _Ticket {
   final DateTime? nextFixDateEnd;
   final String status;
   final String? technicianTeam;
+  final String? requesterUid;
+  final String? requesterDisplayName;
 
   _RepairTimeRange? get upcomingRepairPeriod {
     final start = nextFixDateStart;
@@ -2444,6 +2639,9 @@ class _Ticket {
         (value['room'] != null && value['room'] is! String) ||
         (value['technician_team'] != null &&
             value['technician_team'] is! String) ||
+        (value['requester_uid'] != null && value['requester_uid'] is! String) ||
+        (value['requester_display_name'] != null &&
+            value['requester_display_name'] is! String) ||
         (value['next_fix_date_start'] != null &&
             value['next_fix_date_start'] is! String) ||
         (value['next_fix_date_end'] != null &&
@@ -2493,6 +2691,8 @@ class _Ticket {
       nextFixDateEnd: nextFixDateEnd,
       status: value['status'] as String,
       technicianTeam: value['technician_team'] as String?,
+      requesterUid: value['requester_uid'] as String?,
+      requesterDisplayName: value['requester_display_name'] as String?,
     );
   }
 }

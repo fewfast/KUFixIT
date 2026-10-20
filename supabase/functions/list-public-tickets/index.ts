@@ -561,6 +561,56 @@ Deno.serve(async (request) => {
           correlationId,
         });
       }
+
+      let adminUid = "admin";
+      let adminRole = "Admin";
+      let adminDisplayName = "Admin";
+      try {
+        const claims = await verifyTemporarySession(token, serviceRoleKey);
+        if (claims && typeof claims.sub === "string") {
+          if (claims.username === claims.sub) {
+            const { data: sysAcc } = await supabase
+              .from("Systems_Users")
+              .select("Username, role")
+              .eq("Username", claims.sub)
+              .maybeSingle();
+            adminUid = sysAcc?.Username ?? claims.sub;
+            adminRole = sysAcc?.role ?? "Admin";
+            adminDisplayName = sysAcc?.Username ?? adminUid;
+          } else {
+            const { data: userAcc } = await supabase
+              .from("Users")
+              .select("uid, role, \"Display Name\"")
+              .eq("google_auth_user_id", claims.sub)
+              .maybeSingle();
+            adminUid = userAcc?.uid ?? claims.sub;
+            adminRole = userAcc?.role ?? "Admin";
+            adminDisplayName = userAcc?.["Display Name"] ?? adminUid;
+          }
+        }
+      } catch (e) {
+        console.error("Failed to resolve admin identity for activity log:", e);
+      }
+
+      await supabase.from("activity_logs").insert({
+        actor_username: adminUid,
+        actor_role: adminRole,
+        actor_display_name: adminDisplayName,
+        action_type: "EDIT_TICKET",
+        action_title: "แก้ไขคำร้องแจ้งซ่อม",
+        description: `แอดมินแก้ไขคำร้อง Ticket #${ticketId}`,
+        target_id: ticketId,
+        metadata: {
+          uid: adminUid,
+          ticket_id: ticketId,
+          status,
+          technician_team: technicianTeam ?? null,
+          building,
+          floor: floor ?? null,
+          room: room ?? null,
+        },
+      });
+
       return jsonResponse(200, { updated: true });
     }
 
@@ -568,9 +618,10 @@ Deno.serve(async (request) => {
 
     const page = values.page;
     const pageSize = values.pageSize;
+    const searchTerm = (typeof values.search === "string" ? values.search.trim() : "") || ticketId;
+
     if (
-      ticketId.length > 10 ||
-      !/^\d*$/.test(ticketId) ||
+      searchTerm.length > 100 ||
       typeof page !== "number" ||
       !Number.isSafeInteger(page) ||
       page < 0 ||
@@ -583,24 +634,100 @@ Deno.serve(async (request) => {
     }
     const orderColumn = sortBy === "next_fix_date" ? "next_fix_date_start" : sortBy;
     const offset = page * pageSize;
-    const { data, count, error } = await supabase
+
+    let query = supabase
       .from("FixList")
       .select(
-        "TicketId, building, latitude, longtitude, area, floor, room, status, request_date, technician_team, fix_history_time_start, fix_history_time_end, next_fix_date_start, next_fix_date_end",
+        "TicketId, requester, building, latitude, longtitude, area, floor, room, status, request_date, technician_team, fix_history_time_start, fix_history_time_end, next_fix_date_start, next_fix_date_end",
         { count: "exact" },
-      )
-      .ilike("TicketId", ticketId ? `%${ticketId}%` : "%")
+      );
+
+    if (searchTerm) {
+      const [usersByName, usersByUid] = await Promise.all([
+        supabase
+          .from("Users")
+          .select("uid")
+          .ilike("Display Name", `%${searchTerm}%`)
+          .limit(100),
+        supabase
+          .from("Users")
+          .select("uid")
+          .ilike("uid", `%${searchTerm}%`)
+          .limit(100),
+      ]);
+
+      const matchedRequesterUids = [
+        ...new Set([
+          ...(usersByName.data ?? []).map((u) => u.uid).filter(Boolean),
+          ...(usersByUid.data ?? []).map((u) => u.uid).filter(Boolean),
+        ]),
+      ];
+
+      const escapedTerm = searchTerm.replace(/[,()"]/g, " ").trim();
+      const orConditions: string[] = [];
+      if (escapedTerm) {
+        orConditions.push(`TicketId.ilike.%${escapedTerm}%`);
+        orConditions.push(`requester.ilike.%${escapedTerm}%`);
+      }
+      if (matchedRequesterUids.length > 0) {
+        orConditions.push(`requester.in.(${matchedRequesterUids.join(",")})`);
+      }
+
+      if (orConditions.length > 0) {
+        query = query.or(orConditions.join(","));
+      } else {
+        query = query.eq("TicketId", "0000000000_none");
+      }
+    }
+
+    const { data, count, error } = await query
       .order(orderColumn, { ascending: sortAscending })
       .order("request_date", { ascending: false })
       .order("TicketId", { ascending: false })
       .range(offset, offset + pageSize - 1);
+
     if (error) {
       console.error("Failed to load admin repair requests.", error);
       return jsonResponse(500, {
         error: "Repair requests could not be loaded.",
       });
     }
-    return jsonResponse(200, { tickets: data ?? [], total: count ?? 0 });
+
+    const requesterUids = [
+      ...new Set(
+        (data ?? [])
+          .map((t) => typeof t.requester === "string" ? t.requester.trim() : null)
+          .filter((uid): uid is string => uid != null && uid !== ""),
+      ),
+    ];
+
+    const requesterNameByUid = new Map<string, string>();
+    if (requesterUids.length > 0) {
+      const { data: userRows, error: userError } = await supabase
+        .from("Users")
+        .select("uid, \"Display Name\"")
+        .in("uid", requesterUids);
+      if (!userError && userRows) {
+        for (const u of userRows) {
+          if (typeof u.uid === "string" && typeof u["Display Name"] === "string") {
+            requesterNameByUid.set(u.uid, u["Display Name"]);
+          }
+        }
+      }
+    }
+
+    const tickets = (data ?? []).map((ticket) => {
+      const reqUid = typeof ticket.requester === "string" && ticket.requester.trim()
+        ? ticket.requester.trim()
+        : null;
+      return {
+        ...ticket,
+        requester_uid: reqUid,
+        requester_display_name: reqUid ? (requesterNameByUid.get(reqUid) ?? null) : null,
+      };
+    });
+
+    return jsonResponse(200, { tickets, total: count ?? 0 });
   }
 
   if (action === "my-tickets" || action === "cancel-request") {

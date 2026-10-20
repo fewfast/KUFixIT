@@ -54,6 +54,18 @@ void main() {
         'metadata': {},
         'created_at': '2026-10-20T00:30:00+07:00',
       },
+      {
+        'id': 5,
+        'actor_username': 'u_1020304050',
+        'actor_role': 'User',
+        'actor_display_name': 'ผู้ใช้ทดสอบ',
+        'action_type': 'CHANGE_DISPLAY_NAME',
+        'action_title': 'เปลี่ยนชื่อที่แสดง',
+        'description': 'ผู้ใช้งานเปลี่ยนชื่อที่แสดงเป็น ผู้ใช้ทดสอบ',
+        'target_id': 'u_1020304050',
+        'metadata': {'uid': 'u_1020304050', 'old_name': 'ชื่อเดิม', 'new_name': 'ผู้ใช้ทดสอบ'},
+        'created_at': '2026-10-20T00:15:00+07:00',
+      },
     ];
 
     Future<Map<String, dynamic>> mockFetchLogs({
@@ -67,7 +79,7 @@ void main() {
     }) async {
       return {
         'logs': sampleLogs,
-        'totalCount': 4,
+        'totalCount': 5,
         'page': 1,
         'pageSize': 5,
         'totalPages': 1,
@@ -91,17 +103,21 @@ void main() {
     expect(find.text('SuperAdmin1'), findsOneWidget);
     expect(find.text('ทีมช่าง techteam (u_tech01)'), findsOneWidget);
     expect(find.text('SuperAdmin2'), findsOneWidget);
+    expect(find.text('ผู้ใช้ทดสอบ (u_1020304050)'), findsOneWidget);
 
     // Verify logs rendered
     expect(find.text('อนุมัติงานช่าง'), findsOneWidget);
     expect(find.text('เปลี่ยนบทบาทผู้ใช้'), findsOneWidget);
     expect(find.text('ส่งงานช่าง'), findsOneWidget);
     expect(find.text('ปฏิเสธการแก้ไขผู้ใช้'), findsOneWidget);
+    expect(find.text('เปลี่ยนชื่อที่แสดง'), findsOneWidget);
     expect(find.text('Admin'), findsOneWidget);
     expect(find.text('SuperAdmin'), findsNWidgets(2));
     expect(find.text('Technician'), findsOneWidget);
+    expect(find.text('User'), findsOneWidget);
     expect(find.text('#105'), findsNWidgets(2));
     expect(find.text('#u_123'), findsOneWidget);
+    expect(find.text('#u_1020304050'), findsOneWidget);
 
     // Tap on card to open metadata dialog
     await tester.tap(find.text('อนุมัติงานช่าง'));

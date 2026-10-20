@@ -76,7 +76,7 @@ Deno.serve(async (request) => {
   });
   const { data: account, error: accountError } = await supabase
     .from("Users")
-    .select("google_auth_user_id, status")
+    .select("uid, google_auth_user_id, status, role, \"Display Name\"")
     .eq("google_auth_user_id", claims.sub)
     .maybeSingle();
   if (accountError) {
@@ -92,6 +92,7 @@ Deno.serve(async (request) => {
     });
   }
 
+  const oldDisplayName = account["Display Name"];
   const profileUpdate = {
     "Display Name": displayName,
   };
@@ -100,7 +101,7 @@ Deno.serve(async (request) => {
     .update(profileUpdate)
     .eq("google_auth_user_id", claims.sub);
   const { data, error } = await updateQuery
-    .select("google_auth_user_id, \"Display Name\", role")
+    .select("google_auth_user_id, \"Display Name\", role, uid")
     .maybeSingle();
 
   if (error) {
@@ -109,6 +110,36 @@ Deno.serve(async (request) => {
   }
   if (!data) {
     return jsonResponse(404, { error: "User account was not found." });
+  }
+
+  if (oldDisplayName !== displayName) {
+    const actorRole = (typeof data.role === "string" ? data.role : null) ?? String(claims.role);
+    const actorUid = (typeof data.uid === "string" ? data.uid : null) ??
+      (typeof account.uid === "string" ? account.uid : null) ??
+      String(claims.sub);
+    const description = actorRole === "Admin"
+      ? `แอดมินเปลี่ยนชื่อที่แสดงเป็น ${displayName}`
+      : actorRole === "SuperAdmin"
+      ? `ผู้ดูแลระบบเปลี่ยนชื่อที่แสดงเป็น ${displayName}`
+      : `ผู้ใช้งานเปลี่ยนชื่อที่แสดงเป็น ${displayName}`;
+
+    const { error: logError } = await supabase.from("activity_logs").insert({
+      actor_username: actorUid,
+      actor_role: actorRole,
+      actor_display_name: displayName,
+      action_type: "CHANGE_DISPLAY_NAME",
+      action_title: "เปลี่ยนชื่อที่แสดง",
+      description,
+      target_id: actorUid,
+      metadata: {
+        uid: actorUid,
+        old_name: oldDisplayName ?? null,
+        new_name: displayName,
+      },
+    });
+    if (logError) {
+      console.error("Failed to record activity log for profile update:", logError);
+    }
   }
 
   return jsonResponse(200, {
