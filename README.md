@@ -19,27 +19,30 @@ client app. Protect tables with Supabase Row Level Security (RLS) policies.
 At startup, the app checks the Supabase Auth health endpoint and displays a
 retry page if the connection check fails.
 
-## Realtime refresh
+## Realtime refresh and session persistence
 
-The app uses a private Supabase Broadcast channel for invalidation-only
+The app uses private Supabase Broadcast channels for invalidation-only
 updates. Database triggers publish a constant marker, never ticket, user, or
 other row data. The Flutter pages then reload through their existing
 authorization-checked Edge Functions; Realtime does not grant access to app
 data. Migration `20261019000001_realtime_invalidation.sql` adds the `anon`
-select policy for this single private topic and statement-level triggers for
-the app tables, ticket tables, technician assignment tables, and Storage
-objects. Newly added tables or dynamic table-creation functions must also
-install the invalidation trigger.
+select policy for this topic, and migration
+`20261024000012_activity_logs_realtime_invalidation.sql` extends broadcast
+invalidation to `activity_logs`. Newly added tables or dynamic table-creation
+functions must also install the invalidation trigger.
 
-The `anon` role can subscribe to this one private topic with the app's public
-key. It can observe only that a database change occurred and when; the
-broadcast contains no row data, and the policy does not grant permission to
-publish or access application tables.
+The `anon` role can subscribe to these topics with the app's public key. It can
+observe only that a database change occurred and when; the broadcast contains no
+row data, and the policy does not grant permission to publish or access
+application tables.
 
-Apply the migration before expecting cross-client updates. It has not been
-applied to the remote project. The current local migration history has
-conflicting/unreconciled versions, so inspect and reconcile that history before
-using `supabase db push`; do not push the pending migration set blindly.
+Temporary session tokens in web browsers persist across page refreshes via web
+session storage (`sessionStorage`), preventing unexpected blank or
+unauthenticated screens during browser reloads.
+
+Apply the migrations before expecting cross-client updates. The current local
+migration history has pending/unreconciled versions, so inspect and reconcile
+that history before using `supabase db push`; do not push blindly.
 
 ## Registration and roles
 
@@ -262,25 +265,43 @@ protected by Supabase RLS are not available to temporary sessions; future data
 operations need server-side Edge Function endpoints that verify the signed
 temporary session and authorize each role.
 The centered
-`KUFixIT` text in the app bar is a placeholder for the web logo. The public
-ticket monitor page is in `lib/gui/ticketMonitor.dart`; it searches and pages
-through ticket IDs using the `list-public-tickets` Edge Function, which returns
-the ticket ID, building, area, floor, room, status, and the ticket's shared
-request date. Expanding a ticket loads its equipment details from the child
-table named for that ticket ID. `request_date` records when the repair request
-was submitted; each child table stores one `next_fix_date` as a `timestamptz`.
-The ticket list displays the latest scheduled date across its devices. Null
-repair dates display as not scheduled; null floor and room values display as
-unspecified. Repair history records approved technician reports, their team
-access period, device successes, comments, and result photos. A ticket is
-automatically finished when no device is pending or validating and at least one
-device is finished; its device schedule dates are then cleared.
+`KUFixIT` text in the app bar is a placeholder for the web logo. The ticket
+monitor page is in `lib/gui/ticketMonitor.dart`. For public users, it searches
+and pages through ticket IDs using the `list-public-tickets` Edge Function,
+which returns ticket metadata (ID, building, area, floor, room, status, request date).
+For `Admin` and `SuperAdmin` roles, the monitor runs in privileged mode:
+it displays requester information (UID and display name) alongside child devices,
+supports search queries by TicketId, requester UID, or requester display name,
+and provides right-aligned action buttons for viewing repair history and editing ticket
+details (with floor numbers validated to integers between 1 and 50).
+
+Expanding a ticket loads its equipment details. Repair history records approved
+technician reports, their team access period, device successes, comments, and
+result photos. A ticket is automatically finished when no device is pending or
+validating and at least one device is finished. When technician login periods expire,
+overdue tickets without pending submitted reports are automatically reverted to
+`validating` via `check_and_expire_overdue_tickets`, unassigning the expired team
+and allowing an Admin to re-assign a new team.
 
 Access the initialized client with `SupabaseConnection.client`, for example:
 
 ```dart
 final rows = await SupabaseConnection.client.from('your_table').select();
 ```
+
+## Activity logging
+
+System audit trails are recorded in `public.activity_logs`. The Activity Log page
+(`lib/gui/activity_log_page.dart`) provides Admin and SuperAdmin users with real-time
+auditing of critical actions, including:
+- User profile updates and display name changes (both self-service and administrative edits).
+- Admin edits to other users' display names (logged as `CHANGE_USER_DISPLAY_NAME`).
+- SuperAdmin approval/rejection workflows for role and status modifications.
+- Technician team creation, edits, and schedule assignments.
+- Ticket status updates and maintenance workflows.
+
+The activity log UI supports filtering by actor, target, date range, and action types,
+with live invalidation updates powered by Supabase Realtime broadcast triggers.
 
 ## Getting Started
 
